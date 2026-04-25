@@ -356,7 +356,7 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 		return providerProbeResult{status: probeStatusNotInstalled, detail: "claude executable not found in probe PATH"}
 	}
 
-	stdout, _, err := runProbeCommandWithEnv(ctx, homeDir, 5*time.Second, claudeProbeCommandEnv(), path, "auth", "status", "--json")
+	stdout, _, err := runProbeCommandWithEnv(ctx, homeDir, 30*time.Second, claudeProbeCommandEnv(), path, "auth", "status", "--json")
 	if err != nil && strings.TrimSpace(stdout) == "" {
 		return providerProbeResult{status: probeStatusProbeError, detail: "claude auth status failed before returning JSON"}
 	}
@@ -368,21 +368,15 @@ func probeClaude(ctx context.Context, homeDir string) providerProbeResult {
 	if !status.LoggedIn {
 		return providerProbeResult{status: probeStatusNeedsAuth, detail: "claude is installed but not logged in"}
 	}
-	// Onboarding supports the first-party claude.ai OAuth flow. Both the
-	// interactive `claude /login` flow ("claude.ai") and the long-lived
-	// token from `claude setup-token` ("oauth_token") are accepted — the
-	// latter is needed in headless / containerised environments where the
-	// interactive browser flow is not available. API-key or alternate
-	// providers are intentionally treated as unsupported.
 	if claudeFirstPartyAuthMethod(status.AuthMethod) && status.APIProvider == "firstParty" {
 		return providerProbeResult{status: probeStatusConfigured}
 	}
-	return providerProbeResult{status: probeStatusInvalidConfiguration, detail: "claude must use claude.ai or oauth_token first-party auth"}
+	return providerProbeResult{status: probeStatusInvalidConfiguration, detail: "claude must use first-party auth (claude.ai, oauth_token, or api_key)"}
 }
 
 func claudeFirstPartyAuthMethod(method string) bool {
 	switch method {
-	case "claude.ai", "oauth_token":
+	case "claude.ai", "oauth_token", "api_key":
 		return true
 	}
 	return false

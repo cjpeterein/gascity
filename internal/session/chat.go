@@ -43,6 +43,52 @@ func stripResumeFlag(cmd, resumeFlag, sessionKey string) string {
 	return strings.TrimSpace(result)
 }
 
+// preemptiveStaleKeyCommand returns a fresh-start command (resume flag
+// stripped) when b.Metadata["session_key"] is set but no transcript file
+// exists at the keyed path. Returns "" when no preemption is warranted:
+// key unset, work_dir unset, provider family does not support keyed lookup,
+// transcript file present, or resume flag could not be stripped.
+//
+// Without this preemptive guard, providers that hang on an unknown resume
+// target (notably claude) block sp.Start until the outer context deadline
+// fires, producing a "resuming session: context deadline exceeded" rollback
+// loop when the session_key in metadata no longer matches any on-disk
+// transcript (see em-gqrj).
+//
+// searchPaths is injected so tests can use a t.TempDir() hermetically;
+// production callers pass sessionlog.DefaultSearchPaths().
+func preemptiveStaleKeyCommand(
+	b beads.Bead, resumeCommand string, searchPaths []string,
+) string {
+	sessionKey := b.Metadata["session_key"]
+	if sessionKey == "" {
+		return ""
+	}
+	workDir := b.Metadata["work_dir"]
+	if workDir == "" {
+		return ""
+	}
+	provider := strings.TrimSpace(b.Metadata["provider_kind"])
+	if provider == "" {
+		provider = strings.TrimSpace(b.Metadata["provider"])
+	}
+	// Providers without stable session IDs (codex, gemini, opencode) must
+	// not be preempted here -- DiscoverKeyedPath returns "" for them by
+	// design, which would be indistinguishable from "file missing" without
+	// this guard.
+	if !workertranscript.SupportsIDLookup(provider) {
+		return ""
+	}
+	if workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey) != "" {
+		return ""
+	}
+	freshCmd := stripResumeFlag(resumeCommand, b.Metadata["resume_flag"], sessionKey)
+	if freshCmd == resumeCommand {
+		return ""
+	}
+	return freshCmd
+}
+
 func (m *Manager) clearStaleResumeMetadata(id string, b *beads.Bead) error {
 	if err := m.store.SetMetadata(id, "session_key", ""); err != nil {
 		return fmt.Errorf("clearing stale resume metadata session_key: %w", err)
@@ -248,9 +294,18 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
+	if freshCmd := preemptiveStaleKeyCommand(b, resumeCommand, sessionlog.DefaultSearchPaths()); freshCmd != "" {
+		if err := m.clearStaleResumeMetadata(id, &b); err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return fmt.Errorf("preemptive stale-key cleanup: %w", err)
+		}
+		cfg.Command = freshCmd
+	}
 	started := false
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "" {
+		if (errors.Is(err, runtime.ErrSessionDiedDuringStartup) || errors.Is(err, context.DeadlineExceeded)) && b.Metadata["session_key"] != "" {
 			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if err != nil {
 				return err
@@ -358,10 +413,19 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": provider})
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
+	if freshCmd := preemptiveStaleKeyCommand(b, resumeCommand, sessionlog.DefaultSearchPaths()); freshCmd != "" {
+		if err := m.clearStaleResumeMetadata(id, &b); err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return fmt.Errorf("preemptive stale-key cleanup: %w", err)
+		}
+		cfg.Command = freshCmd
+	}
 	started := false
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 		switch {
-		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && b.Metadata["session_key"] != "":
+		case (errors.Is(err, runtime.ErrSessionDiedDuringStartup) || errors.Is(err, context.DeadlineExceeded)) && b.Metadata["session_key"] != "":
 			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, unroute)
 			if err != nil {
 				return err

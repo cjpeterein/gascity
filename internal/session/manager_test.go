@@ -3293,6 +3293,12 @@ func TestEnsureRunning_RetriesWithoutStaleSessionKey(t *testing.T) {
 
 // TestEnsureRunning_StaleKeyRetryAlsoFails verifies that when the stale-key
 // resume detects death and the fresh retry also fails, the error propagates.
+//
+// The preemptive stale-key guard in ensureRunning would otherwise strip the
+// resume flag before sp.Start is ever called (see preemptiveStaleKeyCommand).
+// To exercise the post-hoc detection path this test targets, we redirect
+// HOME to a temp dir and pre-create the transcript file so the preempt
+// check passes and the original flow runs.
 func TestEnsureRunning_StaleKeyRetryAlsoFails(t *testing.T) {
 	store := beads.NewMemStore()
 	base := runtime.NewFake()
@@ -3300,7 +3306,8 @@ func TestEnsureRunning_StaleKeyRetryAlsoFails(t *testing.T) {
 	sp := &dieAndFailProvider{Fake: base}
 	mgr := NewManager(store, sp)
 
-	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously", "/tmp", "claude", nil, ProviderResume{
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously", workDir, "claude", nil, ProviderResume{
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
 	}, runtime.Config{})
@@ -3316,13 +3323,25 @@ func TestEnsureRunning_StaleKeyRetryAlsoFails(t *testing.T) {
 		t.Fatal("expected session_key in bead metadata")
 	}
 
+	// Redirect DefaultSearchPaths to a temp HOME and pre-create the transcript
+	// so preemptiveStaleKeyCommand treats the resume key as live.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	slugDir := filepath.Join(fakeHome, ".claude", "projects", sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript slug: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(slugDir, b.Metadata["session_key"]+".jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
 
 	sp.callCount = 0
 	resumeCmd := "claude --dangerously --resume " + b.Metadata["session_key"]
-	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: workDir})
 
 	if err == nil {
 		t.Fatal("Send should fail when both stale-key resume and fresh retry fail")
@@ -3340,7 +3359,8 @@ func TestEnsureRunning_RetriesAfterStartupDeathError(t *testing.T) {
 	sp := &startupDeathProvider{Fake: base}
 	mgr := NewManager(store, sp)
 
-	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously", "/tmp", "claude", nil, ProviderResume{
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "worker", "", "claude --dangerously", workDir, "claude", nil, ProviderResume{
 		ResumeFlag:    "--resume",
 		SessionIDFlag: "--session-id",
 	}, runtime.Config{})
@@ -3360,6 +3380,18 @@ func TestEnsureRunning_RetriesAfterStartupDeathError(t *testing.T) {
 		t.Fatalf("SetMetadata started_config_hash: %v", err)
 	}
 
+	// Pre-create the transcript under a fake HOME so preemptiveStaleKeyCommand
+	// skips and the post-hoc startup-death retry path is exercised.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	slugDir := filepath.Join(fakeHome, ".claude", "projects", sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript slug: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(slugDir, sessionKey+".jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
 	if err := mgr.Suspend(info.ID); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
@@ -3367,7 +3399,7 @@ func TestEnsureRunning_RetriesAfterStartupDeathError(t *testing.T) {
 	sp.armed = true
 
 	resumeCmd := "claude --dangerously --resume " + sessionKey
-	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: "/tmp"})
+	err = mgr.Send(context.Background(), info.ID, "hello", resumeCmd, runtime.Config{WorkDir: workDir})
 	if err != nil {
 		t.Fatalf("Send should retry after startup-death error but failed: %v", err)
 	}

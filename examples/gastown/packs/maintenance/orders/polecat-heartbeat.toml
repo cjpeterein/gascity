@@ -1,0 +1,23 @@
+# polecat-heartbeat — wedge detector for polecat sessions.
+#
+# Motivation: a polecat can be alive (provider session up, controller
+# content) and yet wedged mid-tool-call for tens of minutes. The witness
+# patrol uses bead/wisp timestamps plus LLM judgment, which missed the
+# polecat-wedge-incident-2026-05-06 (~28min wedge, no alert).
+#
+# This order is a deterministic companion check: if a polecat's LastActive
+# (session I/O time from the runtime provider) is older than the threshold,
+# file a warrant. The dog pool runs mol-shutdown-dance (3 ALIVE probes
+# before kill), which means a legitimately-long tool call that just hadn't
+# flushed output yet still gets a chance to prove it's alive.
+#
+# Tuning knobs (env vars, read by the script):
+#   POLECAT_HEARTBEAT_THRESHOLD_SECS    default 600 (10m)
+#   POLECAT_HEARTBEAT_TEMPLATE_PATTERN  default "polecat" (regex on Template)
+#   POLECAT_HEARTBEAT_DOG_ROUTE         default "dog"
+#   POLECAT_HEARTBEAT_REQUESTER         default "polecat-heartbeat"
+[order]
+description = "Detect wedged polecats and file warrants for shutdown-dance"
+trigger = "cooldown"
+interval = "5m"
+exec = "$PACK_DIR/assets/scripts/polecat-heartbeat.sh"

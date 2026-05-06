@@ -27,7 +27,7 @@ Push conflicts are handled by fetch + rebase + retry (up to 3 times).
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-commit"
 extends = ["mol-polecat-base"]
-version = 1
+version = 2
 
 [[steps]]
 id = "workspace-setup"
@@ -123,13 +123,32 @@ for attempt in 1 2 3; do
 done
 ```
 
-**3. Clean up worktree:**
+**3. Gated drain-exit cleanup.**
+
+Remove the worktree only when the tree is clean AND every local commit is
+already reachable from `origin/{{base_branch}}`. Both gates must pass — if
+either fails, log the reason and leave the worktree intact so the witness
+can salvage or prune it later. Never pass `--force`: the gates are the
+safety mechanism, and force-remove would defeat them.
+
 ```bash
 WORKTREE_PATH=$(pwd)
-cd ..
-git worktree remove "$WORKTREE_PATH" --force
-bd update {{issue}} --unset-metadata work_dir
+
+if [ -n "$(git status --porcelain)" ]; then
+    echo "skip-cleanup: working tree is dirty"
+elif [ "$(git rev-list --count origin/{{base_branch}}..HEAD)" -ne 0 ]; then
+    echo "skip-cleanup: HEAD has commits not in origin/{{base_branch}}"
+else
+    cd ..
+    git worktree remove "$WORKTREE_PATH"
+    bd update {{issue}} --unset-metadata work_dir
+fi
 ```
+
+In the normal commit variant flow, the push lands HEAD at
+`origin/{{base_branch}}`, so both gates pass and the worktree is pruned.
+The variant's HEAD is detached (see workspace-setup), so no branch deletion
+is required here.
 
 **4. Close the bead:**
 ```bash

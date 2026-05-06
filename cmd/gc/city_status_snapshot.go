@@ -6,11 +6,13 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 type cityStatusSnapshot struct {
@@ -30,6 +32,7 @@ type cityStatusAgentRow struct {
 	GroupName   string
 	ScaleLabel  string
 	Expanded    bool
+	Draining    bool
 }
 
 type cityStatusNamedSession struct {
@@ -56,11 +59,27 @@ func openCityStatusStore(cityPath string, stderr io.Writer) (beads.Store, int) {
 }
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
-	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(store), stderr)
+	return collectCityStatusSnapshotFromStoreSnapshot(sp, nil, cfg, cityPath, store, loadStatusSessionSnapshot(store), stderr)
+}
+
+// agentObservationTask describes a single agent row that needs a live
+// observation. Building these up front lets the observation subprocess
+// fan-out run concurrently instead of serially per agent.
+type agentObservationTask struct {
+	agent         config.Agent
+	scope         string
+	suspendedBase bool
+	expanded      bool
+	scaleLabel    string
+	displayName   string
+	qualifiedName string
+	groupName     string
+	target        statusObservationTarget
 }
 
 func collectCityStatusSnapshotFromStoreSnapshot(
 	sp runtime.Provider,
+	dops drainOps,
 	cfg *config.City,
 	cityPath string,
 	store beads.Store,
@@ -105,8 +124,12 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		}
 	}
 
+	// Phase 1: build the flat list of observation tasks. This runs the
+	// pool discovery (which is lightweight) but defers the per-session
+	// runtime observations so they can be parallelized below.
+	tasks := make([]agentObservationTask, 0, len(cfg.Agents))
 	for _, a := range cfg.Agents {
-		suspended := a.Suspended || (a.Dir != "" && suspendedRigs[a.Dir])
+		suspendedBase := a.Suspended || (a.Dir != "" && suspendedRigs[a.Dir])
 		sp0 := scaleParamsFor(&a)
 		scope := "city"
 		if a.Dir != "" {
@@ -122,54 +145,90 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 			headerShown := false
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, snapshot.CityName, cfg.Workspace.SessionTemplate, sp) {
 				target := statusObservationTargetForIdentity(statusSnapshot, snapshot.CityName, qualifiedInstance, cfg.Workspace.SessionTemplate)
-				obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, target, stderr)
 				_, instanceName := config.ParseQualifiedName(qualifiedInstance)
-				row := cityStatusAgentRow{
-					Agent: StatusAgentJSON{
-						Name:          instanceName,
-						QualifiedName: qualifiedInstance,
-						Scope:         scope,
-						Running:       obs.Running,
-						Suspended:     suspended || obs.Suspended,
-						Pool:          nil,
-					},
-					SessionName: target.runtimeSessionName,
-					GroupName:   a.QualifiedName(),
-					Expanded:    true,
+				task := agentObservationTask{
+					agent:         a,
+					scope:         scope,
+					suspendedBase: suspendedBase,
+					expanded:      true,
+					displayName:   instanceName,
+					qualifiedName: qualifiedInstance,
+					groupName:     a.QualifiedName(),
+					target:        target,
 				}
 				if !headerShown {
-					row.ScaleLabel = scaleLabel
+					task.scaleLabel = scaleLabel
 					headerShown = true
 				}
-				snapshot.Agents = append(snapshot.Agents, row)
-				snapshot.Summary.TotalAgents++
-				if obs.Running {
-					snapshot.Summary.RunningAgents++
-				}
-				addRigCount(a.Dir, suspended || obs.Suspended)
+				tasks = append(tasks, task)
 			}
 			continue
 		}
 
 		target := statusObservationTargetForIdentity(statusSnapshot, snapshot.CityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
-		obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, target, stderr)
-		snapshot.Agents = append(snapshot.Agents, cityStatusAgentRow{
-			Agent: StatusAgentJSON{
-				Name:          a.Name,
-				QualifiedName: a.QualifiedName(),
-				Scope:         scope,
-				Running:       obs.Running,
-				Suspended:     suspended || obs.Suspended,
-			},
-			SessionName: target.runtimeSessionName,
-			GroupName:   a.QualifiedName(),
-			Expanded:    false,
+		tasks = append(tasks, agentObservationTask{
+			agent:         a,
+			scope:         scope,
+			suspendedBase: suspendedBase,
+			expanded:      false,
+			displayName:   a.Name,
+			qualifiedName: a.QualifiedName(),
+			groupName:     a.QualifiedName(),
+			target:        target,
 		})
+	}
+
+	// Phase 2: run all observations (and, when available, drain checks)
+	// concurrently. The per-session tmux subprocess fan-out dominated the
+	// wall-clock cost of `gc status` before this change; running them in
+	// parallel keeps CPU and fork overhead but collapses the serial chain.
+	type observationResult struct {
+		obs      worker.LiveObservation
+		draining bool
+	}
+	results := make([]observationResult, len(tasks))
+	var wg sync.WaitGroup
+	for i := range tasks {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			obs := observeSessionTargetWithWarning("gc status", cityPath, store, sp, cfg, tasks[idx].target, stderr)
+			draining := false
+			if dops != nil && obs.Running && tasks[idx].target.runtimeSessionName != "" {
+				if d, err := dops.isDraining(tasks[idx].target.runtimeSessionName); err == nil {
+					draining = d
+				}
+			}
+			results[idx] = observationResult{obs: obs, draining: draining}
+		}(i)
+	}
+	wg.Wait()
+
+	// Phase 3: walk the task list in order and assemble the snapshot so
+	// the output order matches the config declaration order exactly as it
+	// did when the loop was serial.
+	for i, task := range tasks {
+		res := results[i]
+		row := cityStatusAgentRow{
+			Agent: StatusAgentJSON{
+				Name:          task.displayName,
+				QualifiedName: task.qualifiedName,
+				Scope:         task.scope,
+				Running:       res.obs.Running,
+				Suspended:     task.suspendedBase || res.obs.Suspended,
+			},
+			SessionName: task.target.runtimeSessionName,
+			GroupName:   task.groupName,
+			ScaleLabel:  task.scaleLabel,
+			Expanded:    task.expanded,
+			Draining:    res.draining,
+		}
+		snapshot.Agents = append(snapshot.Agents, row)
 		snapshot.Summary.TotalAgents++
-		if obs.Running {
+		if res.obs.Running {
 			snapshot.Summary.RunningAgents++
 		}
-		addRigCount(a.Dir, suspended || obs.Suspended)
+		addRigCount(task.agent.Dir, task.suspendedBase || res.obs.Suspended)
 	}
 
 	for _, r := range cfg.Rigs {
@@ -285,7 +344,7 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 	}
 }
 
-func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.Writer) {
+func renderCityStatusText(snapshot cityStatusSnapshot, stdout io.Writer) {
 	fmt.Fprintf(stdout, "%s  %s\n", snapshot.CityName, snapshot.CityPath)                //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "  Controller: %s\n", controllerStatusLine(snapshot.Controller)) //nolint:errcheck // best-effort stdout
 	for _, line := range controllerStatusGuidance(snapshot.Controller, snapshot.CityPath) {
@@ -305,7 +364,7 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 			if row.ScaleLabel != "" {
 				fmt.Fprintf(stdout, "  %-24s%s\n", row.GroupName, row.ScaleLabel) //nolint:errcheck // best-effort stdout
 			}
-			status := agentStatusLine(row.Agent.Running, dops, row.SessionName, row.Agent.Suspended)
+			status := agentStatusLineFromRow(row)
 			if row.Expanded {
 				fmt.Fprintf(stdout, "    %-22s%s\n", row.Agent.QualifiedName, status) //nolint:errcheck // best-effort stdout
 			} else {

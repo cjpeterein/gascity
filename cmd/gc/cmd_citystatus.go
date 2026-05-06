@@ -220,8 +220,8 @@ func doCityStatusWithStoreAndSnapshot(
 	statusSnapshot *sessionBeadSnapshot,
 	stdout, stderr io.Writer,
 ) int {
-	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
-	renderCityStatusText(snapshot, dops, stdout)
+	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, dops, cfg, cityPath, store, statusSnapshot, stderr)
+	renderCityStatusText(snapshot, stdout)
 
 	if store != nil {
 		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg)
@@ -261,7 +261,7 @@ func doCityStatusJSONWithStoreAndSnapshot(
 	statusSnapshot *sessionBeadSnapshot,
 	stdout, stderr io.Writer,
 ) int {
-	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
+	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, nil, cfg, cityPath, store, statusSnapshot, stderr)
 	if store != nil {
 		sessions, err := collectCitySessionCounts(cityPath, store, sp, cfg)
 		if err != nil {

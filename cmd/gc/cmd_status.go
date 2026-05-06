@@ -132,8 +132,25 @@ func doRigStatusWithStoreAndSnapshot(
 
 // agentStatusLine returns a human-readable status string for an agent session.
 func agentStatusLine(running bool, dops drainOps, sn string, suspended bool) string {
-	draining, _ := dops.isDraining(sn)
+	draining := false
+	if running && dops != nil && sn != "" {
+		if d, err := dops.isDraining(sn); err == nil {
+			draining = d
+		}
+	}
+	return formatAgentStatusLine(running, draining, suspended)
+}
 
+// agentStatusLineFromRow renders the status line from a snapshot row that
+// already has the draining state pre-computed. This avoids re-running a
+// tmux subprocess per agent during rendering.
+func agentStatusLineFromRow(row cityStatusAgentRow) string {
+	return formatAgentStatusLine(row.Agent.Running, row.Draining, row.Agent.Suspended)
+}
+
+// formatAgentStatusLine maps a running/draining/suspended triple to its
+// text rendering.
+func formatAgentStatusLine(running, draining, suspended bool) string {
 	switch {
 	case running && draining:
 		return "running  (draining)"

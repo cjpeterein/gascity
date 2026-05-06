@@ -6,8 +6,10 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -246,8 +248,11 @@ func TestCityStatusUsesStatusSnapshotToRouteACPDrainMetadata(t *testing.T) {
 		t.Fatalf("running = false, want true")
 	}
 
+	// Re-collect the snapshot with drain state folded in so the rendered
+	// text reflects it.
+	snapshot = collectCityStatusSnapshotFromStoreSnapshot(sp, newDrainOps(sp), cfg, "/home/user/city", store, loadStatusSessionSnapshot(store), io.Discard)
 	var stdout bytes.Buffer
-	renderCityStatusText(snapshot, newDrainOps(sp), &stdout)
+	renderCityStatusText(snapshot, &stdout)
 	if !strings.Contains(stdout.String(), "running  (draining)") {
 		t.Fatalf("stdout = %q, want draining status for ACP-backed custom runtime name", stdout.String())
 	}
@@ -339,6 +344,101 @@ func TestCityStatusUsesBeadBackedRuntimeNameForStampedPoolSlotBead(t *testing.T)
 	if got := snapshot.Agents[0].SessionName; got != "custom-dog-1" {
 		t.Fatalf("frontend/dog-1 SessionName = %q, want %q", got, "custom-dog-1")
 	}
+}
+
+// TestCityStatusAgentObservationsRunInParallel exercises the parallel
+// observation fan-out added to collectCityStatusSnapshotFromStoreSnapshot.
+// With serial observations, wall-clock time scales with len(agents); with
+// the parallel implementation it scales with the slowest single call.
+// We inject per-session latency via a slow runtime.Provider wrapper and
+// assert the fan-out completes in well under the serial worst case.
+func TestCityStatusAgentObservationsRunInParallel(t *testing.T) {
+	// Ten scaled pool slots expand into ten observations. At 50ms each,
+	// serial execution takes ≥500ms; parallel execution should finish in
+	// roughly one 50ms slot plus scheduling overhead.
+	const perCallDelay = 50 * time.Millisecond
+	const agentCount = 10
+	sp := &slowObserveProvider{Provider: runtime.NewFake(), delay: perCallDelay}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents:    []config.Agent{{Name: "dog", MaxActiveSessions: intPtr(agentCount)}},
+	}
+
+	start := time.Now()
+	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", beads.NewMemStore(), io.Discard)
+	elapsed := time.Since(start)
+
+	if len(snapshot.Agents) != agentCount {
+		t.Fatalf("agents = %d, want %d", len(snapshot.Agents), agentCount)
+	}
+	// The serial worst case is perCallDelay*agentCount = 500ms. Use half
+	// of that as the regression threshold — parallel fan-out will land
+	// well under that on any reasonable hardware, and a serial regression
+	// will blow past it.
+	if limit := (perCallDelay * time.Duration(agentCount)) / 2; elapsed >= limit {
+		t.Fatalf("collectCityStatusSnapshot took %v; parallel fan-out should finish well under %v (serial would need ≥%v)",
+			elapsed, limit, perCallDelay*time.Duration(agentCount))
+	}
+
+	// Output order must match the pool expansion order even though the
+	// observations completed out of order.
+	for i, row := range snapshot.Agents {
+		want := "dog-" + strconv.Itoa(i+1)
+		if row.Agent.QualifiedName != want {
+			t.Fatalf("snapshot.Agents[%d].QualifiedName = %q, want %q", i, row.Agent.QualifiedName, want)
+		}
+	}
+}
+
+// TestCityStatusSnapshotCapturesDrainingState verifies that drain state is
+// captured into the snapshot during collection so the render step does not
+// need to re-query the provider (which previously spawned a tmux subprocess
+// per row).
+func TestCityStatusSnapshotCapturesDrainingState(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	dops := newFakeDrainOps()
+	if err := dops.setDrain("mayor"); err != nil {
+		t.Fatalf("setDrain: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
+	}
+
+	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, dops, cfg, "/home/user/city", beads.NewMemStore(), nil, io.Discard)
+	if len(snapshot.Agents) != 1 {
+		t.Fatalf("agents = %d, want 1", len(snapshot.Agents))
+	}
+	row := snapshot.Agents[0]
+	if !row.Agent.Running {
+		t.Fatalf("row.Running = false, want true")
+	}
+	if !row.Draining {
+		t.Fatalf("row.Draining = false, want true (drain was set via dops)")
+	}
+
+	// Rendering must surface the drain marker using the pre-computed row
+	// state — without consulting a drainOps instance.
+	var stdout bytes.Buffer
+	renderCityStatusText(snapshot, &stdout)
+	if !strings.Contains(stdout.String(), "running  (draining)") {
+		t.Fatalf("stdout = %q, want running (draining) status", stdout.String())
+	}
+}
+
+// slowObserveProvider injects a fixed delay into each IsRunning call so
+// serial observation loops are easy to distinguish from parallel ones.
+type slowObserveProvider struct {
+	runtime.Provider
+	delay time.Duration
+}
+
+func (p *slowObserveProvider) IsRunning(name string) bool {
+	time.Sleep(p.delay)
+	return p.Provider.IsRunning(name)
 }
 
 func TestCityStatusNamedSessionLookupErrorsAreSurfaced(t *testing.T) {

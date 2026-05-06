@@ -55,9 +55,38 @@ func TestPolecatCommitFormulaVersionBumpedForDrainExitCleanup(t *testing.T) {
 	if _, err := toml.Decode(body, &parsed); err != nil {
 		t.Fatalf("decoding polecat-commit formula: %v", err)
 	}
-	if parsed.Version < 2 {
-		t.Errorf("mol-polecat-commit version = %d, want >= 2 (bumped for gated drain-exit cleanup)", parsed.Version)
+	if parsed.Version < 3 {
+		t.Errorf("mol-polecat-commit version = %d, want >= 3 (bumped for adhoc session-close on drain-exit)", parsed.Version)
 	}
+}
+
+// TestPolecatCommitFormulaGatesAdhocSessionCloseOnDrainExit verifies that the
+// drain-exit cleanup closes the session bead only when the alias matches the
+// adhoc pattern, and that the close runs before gc runtime drain-ack.
+func TestPolecatCommitFormulaGatesAdhocSessionCloseOnDrainExit(t *testing.T) {
+	body := readCorePolecatCommitFormula(t)
+
+	for _, want := range []string{
+		`-adhoc-[0-9a-f]+$`,
+		`gc session close "$GC_SESSION_ID" || true`,
+		`GC_SESSION_NAME`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat-commit formula missing adhoc session-close guidance %q", want)
+		}
+	}
+
+	if strings.Contains(body, `gc session close "$GC_SESSION_ID"`) &&
+		!strings.Contains(body, `gc session close "$GC_SESSION_ID" || true`) {
+		t.Errorf("polecat-commit formula must not let session close mask drain-ack (missing || true)")
+	}
+
+	assertContainsInOrderCommit(t, body,
+		`git worktree remove "$WORKTREE_PATH"`,
+		`-adhoc-[0-9a-f]+$`,
+		`gc session close "$GC_SESSION_ID" || true`,
+		`gc runtime drain-ack`,
+	)
 }
 
 // assertContainsInOrderCommit checks that each fragment appears in body in the

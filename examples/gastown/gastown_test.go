@@ -274,9 +274,45 @@ func TestPolecatWorkFormulaVersionBumpedForDrainExitCleanup(t *testing.T) {
 	if _, err := toml.Decode(string(data), &parsed); err != nil {
 		t.Fatalf("decoding polecat formula: %v", err)
 	}
-	if parsed.Version < 10 {
-		t.Errorf("mol-polecat-work version = %d, want >= 10 (bumped for gated drain-exit cleanup)", parsed.Version)
+	if parsed.Version < 11 {
+		t.Errorf("mol-polecat-work version = %d, want >= 11 (bumped for adhoc session-close on drain-exit)", parsed.Version)
 	}
+}
+
+// TestPolecatWorkFormulaGatesAdhocSessionCloseOnDrainExit verifies the
+// drain-exit cleanup closes the session bead only when the alias matches the
+// adhoc pattern, and that the close runs before gc runtime drain-ack.
+func TestPolecatWorkFormulaGatesAdhocSessionCloseOnDrainExit(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`-adhoc-[0-9a-f]+$`,
+		`gc session close "$GC_SESSION_ID" || true`,
+		`GC_SESSION_NAME`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat-work formula missing adhoc session-close guidance %q", want)
+		}
+	}
+
+	if strings.Contains(body, `gc session close "$GC_SESSION_ID"`) &&
+		!strings.Contains(body, `gc session close "$GC_SESSION_ID" || true`) {
+		t.Errorf("polecat-work formula must not let session close mask drain-ack (missing || true)")
+	}
+
+	assertContainsInOrder(t, body,
+		`git worktree remove "$WORKTREE_PATH"`,
+		`git branch -D "$BRANCH"`,
+		`-adhoc-[0-9a-f]+$`,
+		`gc session close "$GC_SESSION_ID" || true`,
+		`gc runtime drain-ack`,
+	)
 }
 
 func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {

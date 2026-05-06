@@ -27,7 +27,7 @@ Push conflicts are handled by fetch + rebase + retry (up to 3 times).
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-commit"
 extends = ["mol-polecat-base"]
-version = 2
+version = 3
 
 [[steps]]
 id = "workspace-setup"
@@ -156,7 +156,22 @@ bd update {{issue}} --notes "Committed directly to {{base_branch}}: <brief summa
 bd close {{issue}}
 ```
 
-**5. Signal reconciler and exit.**
+**5. Close own session bead (adhoc aliases only).**
+
+Pool polecats (`polecat-1`, `polecat-2`, …) and named sessions (mayor,
+deacon, refinery) recycle across drain cycles — their session beads must
+survive. Adhoc polecats are one-shot: alias looks like `*-adhoc-<hex>`
+and is never reused. Close the session bead so `gc session list` stops
+accumulating drained adhoc entries. `|| true` keeps a close failure from
+masking the drain-ack.
+
+```bash
+if printf '%s' "${GC_SESSION_NAME:-}" | grep -Eq -- '-adhoc-[0-9a-f]+$'; then
+    gc session close "$GC_SESSION_ID" || true
+fi
+```
+
+**6. Signal reconciler and exit.**
 ```bash
 gc runtime drain-ack
 exit

@@ -2121,7 +2121,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "DefaultRigIncludes lists pack directories applied to new rigs when\n\"gc rig add\" is called without --include. Allows cities to define\na default pack for all rigs."
+          "description": "DefaultRigIncludes lists pack directories derived from\n[defaults.rig.imports] in the city root pack. \"gc rig add\" copies\nthem into newly-added rigs' imports, and at runtime LoadWithIncludes\nexpands the same defaults against every rig that does not already\ndeclare a matching [rigs.imports.\u003cname\u003e] binding. Populated from the\npack by LoadWithIncludes; may also be authored directly in\ncity.toml."
         }
       },
       "additionalProperties": false,

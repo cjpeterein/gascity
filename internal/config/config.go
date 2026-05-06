@@ -858,9 +858,13 @@ type Workspace struct {
 	// workspace. Replaces the older pack/packs fields. Each entry
 	// is a local path, a git source//sub#ref URL, or a GitHub tree URL.
 	Includes []string `toml:"includes,omitempty"`
-	// DefaultRigIncludes lists pack directories applied to new rigs when
-	// "gc rig add" is called without --include. Allows cities to define
-	// a default pack for all rigs.
+	// DefaultRigIncludes lists pack directories derived from
+	// [defaults.rig.imports] in the city root pack. "gc rig add" copies
+	// them into newly-added rigs' imports, and at runtime LoadWithIncludes
+	// expands the same defaults against every rig that does not already
+	// declare a matching [rigs.imports.<name>] binding. Populated from the
+	// pack by LoadWithIncludes; may also be authored directly in
+	// city.toml.
 	DefaultRigIncludes []string `toml:"default_rig_includes,omitempty"`
 }
 

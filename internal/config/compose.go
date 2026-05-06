@@ -123,11 +123,22 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				}
 			}
 		}
-		defaultRigIncludes, err := defaultRigIncludesFromPackDefaults(pc.Defaults, md)
+		defaultRigImports, err := defaultRigImportsFromPackDefaults(pc.Defaults, md)
 		if err != nil {
 			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
 		}
-		if len(defaultRigIncludes) > 0 {
+		if len(defaultRigImports) > 0 {
+			defaultRigIncludes := make([]string, 0, len(defaultRigImports))
+			if root.DefaultRigImports == nil {
+				root.DefaultRigImports = make(map[string]Import, len(defaultRigImports))
+			}
+			for _, bound := range defaultRigImports {
+				defaultRigIncludes = append(defaultRigIncludes, bound.Import.Source)
+				if _, exists := root.DefaultRigImports[bound.Binding]; !exists {
+					root.DefaultRigImports[bound.Binding] = bound.Import
+					root.DefaultRigImportOrder = append(root.DefaultRigImportOrder, bound.Binding)
+				}
+			}
 			root.Workspace.DefaultRigIncludes = append(defaultRigIncludes, root.Workspace.DefaultRigIncludes...)
 		}
 		// Merge pack.toml providers (pack is base, city wins).
@@ -414,8 +425,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 
 	// Expand rig packs after patches (pack agents get rig overrides).
+	// Also run when [defaults.rig.imports] is set on the root pack: those
+	// entries apply to every rig, so even rigs declared without their own
+	// [rigs.imports.X] or `includes` need expansion.
 	rigFormulaDirs := make(map[string][]string)
-	if HasPackRigs(root.Rigs) {
+	if HasPackRigs(root.Rigs) || len(root.DefaultRigImports) > 0 {
 		if err := expandPacks(root, fs, cityRoot, rigFormulaDirs, opts); err != nil {
 			return nil, nil, fmt.Errorf("expanding packs: %w", err)
 		}
@@ -1162,18 +1176,6 @@ func defaultRigImportsFromPackDefaults(defaults packDefaults, md toml.MetaData) 
 		imports = append(imports, BoundImport{Binding: name, Import: imp})
 	}
 	return imports, nil
-}
-
-func defaultRigIncludesFromPackDefaults(defaults packDefaults, md toml.MetaData) ([]string, error) {
-	imports, err := defaultRigImportsFromPackDefaults(defaults, md)
-	if err != nil {
-		return nil, err
-	}
-	includes := make([]string, 0, len(imports))
-	for _, bound := range imports {
-		includes = append(includes, bound.Import.Source)
-	}
-	return includes, nil
 }
 
 func orderedDefaultRigImportNames(imports map[string]Import, md toml.MetaData) []string {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -458,6 +459,149 @@ source = "../helper"
 	}
 	if skills[0].SourceDir != filepath.Join(packDir, "skills") {
 		t.Fatalf("rig skill SourceDir = %q, want %q", skills[0].SourceDir, filepath.Join(packDir, "skills"))
+	}
+}
+
+// TestLoadWithIncludes_DefaultsRigImportsExpandOnExistingRigs exercises the
+// contract that [defaults.rig.imports.<name>] entries in the city root pack.toml
+// materialize the pack's rig-scoped agents as [[agent]] bindings on every rig
+// in [[rigs]] — even rigs that were declared inline in city.toml without their
+// own [rigs.imports.X] blocks. This mirrors how [workspace.includes] exposes
+// city-scoped agents.
+func TestLoadWithIncludes_DefaultsRigImportsExpandOnExistingRigs(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "city", ".gc", "packs", "rig-base")
+	cityDir := filepath.Join(dir, "city")
+	rigDir := filepath.Join(dir, "rig-alpha")
+
+	// Pack with a rig-scoped agent discovered by convention.
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "rig-base"
+schema = 2
+`)
+	writeTestFile(t, packDir, "agents/polecat/agent.toml", `
+scope = "rig"
+wake_mode = "fresh"
+`)
+	writeTestFile(t, packDir, "agents/polecat/prompt.template.md", "# polecat\n")
+
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+
+[defaults.rig.imports.rig-base]
+source = "./.gc/packs/rig-base"
+`)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "alpha"
+path = "`+rigDir+`"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var polecat *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Dir == "alpha" && strings.HasSuffix(cfg.Agents[i].Name, "polecat") {
+			polecat = &cfg.Agents[i]
+			break
+		}
+	}
+	if polecat == nil {
+		names := make([]string, 0, len(cfg.Agents))
+		for _, a := range cfg.Agents {
+			names = append(names, fmt.Sprintf("%s/%s", a.Dir, a.Name))
+		}
+		t.Fatalf("default rig import did not materialize rig-scoped polecat on rig %q; agents=%v", "alpha", names)
+	}
+	if polecat.BindingName != "rig-base" {
+		t.Errorf("polecat BindingName = %q, want %q", polecat.BindingName, "rig-base")
+	}
+	if polecat.Scope != "rig" {
+		t.Errorf("polecat Scope = %q, want %q", polecat.Scope, "rig")
+	}
+}
+
+// TestLoadWithIncludes_DefaultsRigImportsYieldToRigImports verifies that a
+// rig's explicit [rigs.imports.<name>] entry overrides a same-named entry in
+// [defaults.rig.imports].
+func TestLoadWithIncludes_DefaultsRigImportsYieldToRigImports(t *testing.T) {
+	dir := t.TempDir()
+	defaultPackDir := filepath.Join(dir, "city", ".gc", "packs", "rig-base-default")
+	overridePackDir := filepath.Join(dir, "city", ".gc", "packs", "rig-base-override")
+	cityDir := filepath.Join(dir, "city")
+	rigDir := filepath.Join(dir, "rig-alpha")
+
+	writeTestFile(t, defaultPackDir, "pack.toml", `
+[pack]
+name = "rig-base-default"
+schema = 2
+`)
+	writeTestFile(t, defaultPackDir, "agents/polecat/agent.toml", `
+scope = "rig"
+`)
+	writeTestFile(t, defaultPackDir, "agents/polecat/prompt.template.md", "# default polecat\n")
+
+	writeTestFile(t, overridePackDir, "pack.toml", `
+[pack]
+name = "rig-base-override"
+schema = 2
+`)
+	writeTestFile(t, overridePackDir, "agents/polecat/agent.toml", `
+scope = "rig"
+`)
+	writeTestFile(t, overridePackDir, "agents/polecat/prompt.template.md", "# override polecat\n")
+
+	writeTestFile(t, cityDir, "pack.toml", `
+[pack]
+name = "city"
+schema = 2
+
+[defaults.rig.imports.rig-base]
+source = "./.gc/packs/rig-base-default"
+`)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "alpha"
+path = "`+rigDir+`"
+
+[rigs.imports.rig-base]
+source = "../city/.gc/packs/rig-base-override"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var polecat *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Dir == "alpha" && cfg.Agents[i].Name == "polecat" {
+			polecat = &cfg.Agents[i]
+			break
+		}
+	}
+	if polecat == nil {
+		t.Fatalf("polecat agent not materialized")
+	}
+	// The rig-level import points at rig-base-override, whose pack name is
+	// "rig-base-override"; the default would have set PackName to
+	// "rig-base-default". PackName is the reliable tiebreaker.
+	if polecat.PackName != "rig-base-override" {
+		t.Errorf("polecat PackName = %q, want %q (rig-level import must win over default)", polecat.PackName, "rig-base-override")
 	}
 }
 

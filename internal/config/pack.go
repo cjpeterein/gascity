@@ -6,6 +6,7 @@ import (
 	"fmt"
 	iofs "io/fs"
 	"log"
+	"maps"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -49,6 +50,21 @@ type packRigDefaults struct {
 	Imports map[string]Import `toml:"imports,omitempty"`
 }
 
+// mergeRigImportsWithDefaults returns the effective set of rig-level imports
+// after applying the city-level [defaults.rig.imports] bindings. Rig-level
+// entries win on name collision; defaults apply to every rig so a single
+// declaration at the city root pack exposes shared rig-scoped agents on all
+// rigs without each rig needing to re-declare the import.
+func mergeRigImportsWithDefaults(rigImports, defaults map[string]Import) map[string]Import {
+	if len(defaults) == 0 {
+		return rigImports
+	}
+	merged := make(map[string]Import, len(rigImports)+len(defaults))
+	maps.Copy(merged, defaults)
+	maps.Copy(merged, rigImports)
+	return merged
+}
+
 // ExpandPacks resolves pack references on all rigs. For each rig
 // with pack fields set (V1 includes or V2 [rigs.imports.X]), it loads
 // the pack directories, stamps agents with dir = rig.Name and
@@ -72,7 +88,8 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 		rig := &cfg.Rigs[i]
 		cache := &packLoadCache{results: make(map[string]*packLoadResult)}
 		topoRefs := rig.Includes
-		if len(topoRefs) == 0 && len(rig.Imports) == 0 {
+		effectiveImports := mergeRigImportsWithDefaults(rig.Imports, cfg.DefaultRigImports)
+		if len(topoRefs) == 0 && len(effectiveImports) == 0 {
 			continue
 		}
 
@@ -175,16 +192,18 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			}
 		}
 
-		// Process rig-level [imports.X] entries (V2).
-		if len(rig.Imports) > 0 {
-			importNames := make([]string, 0, len(rig.Imports))
-			for name := range rig.Imports {
+		// Process rig-level [imports.X] entries (V2), merged with any
+		// city-level [defaults.rig.imports.X] bindings. Rig-level entries
+		// win on name collision.
+		if len(effectiveImports) > 0 {
+			importNames := make([]string, 0, len(effectiveImports))
+			for name := range effectiveImports {
 				importNames = append(importNames, name)
 			}
 			sort.Strings(importNames)
 
 			for _, bindingName := range importNames {
-				imp := rig.Imports[bindingName]
+				imp := effectiveImports[bindingName]
 
 				impDir, err := resolvePackRef(imp.Source, cityRoot, cityRoot)
 				if err != nil {

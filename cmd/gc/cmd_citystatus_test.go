@@ -186,6 +186,39 @@ func TestCityStatusPoolExpansion(t *testing.T) {
 	}
 }
 
+// TestCityStatusSkipsProviderProbesForStoppedPoolMembers guards the
+// gc-status-latency fix (ga-8g8): for stopped pool members, the status render
+// must fast-path on the cached IsRunning result and avoid fanning out into
+// per-session tmux-backed probes (GetMeta, IsAttached, GetLastActivity,
+// ProcessAlive). Each skipped probe elides a tmux subprocess on live hosts;
+// regressing this test reintroduces the ~7s status latency.
+func TestCityStatusSkipsProviderProbesForStoppedPoolMembers(t *testing.T) {
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: "echo 5"},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatus(sp, dops, cfg, "/tmp/city", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "GetMeta", "IsAttached", "GetLastActivity", "ProcessAlive":
+			t.Fatalf("status made %s call for stopped pool member %q; expected fast-path on IsRunning only", call.Method, call.Name)
+		}
+	}
+	if !strings.Contains(stdout.String(), "0/5 agents running") {
+		t.Errorf("stdout missing '0/5 agents running', got:\n%s", stdout.String())
+	}
+}
+
 func TestCityStatusRigs(t *testing.T) {
 	sp := runtime.NewFake()
 	dops := newFakeDrainOps()

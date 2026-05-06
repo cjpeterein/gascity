@@ -1254,6 +1254,33 @@ func TestRuntimeHandleExpandedWorkerSurface(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandleLiveObservationStoppedSkipsMetaProbes(t *testing.T) {
+	sp := runtime.NewFake()
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+		ProcessNames: []string{"claude"},
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	obs, err := handle.LiveObservation(context.Background())
+	if err != nil {
+		t.Fatalf("LiveObservation: %v", err)
+	}
+	if obs.Running {
+		t.Fatalf("LiveObservation.Running = true, want false; obs=%#v", obs)
+	}
+	for _, call := range sp.Calls {
+		switch call.Method {
+		case "GetMeta", "ProcessAlive", "IsAttached", "GetLastActivity":
+			t.Fatalf("calls = %#v, want no %s probes when runtime is stopped", sp.Calls, call.Method)
+		}
+	}
+}
+
 func TestRuntimeHandleStateStoppedSkipsPendingProbe(t *testing.T) {
 	sp := runtime.NewFake()
 	sp.SetPendingInteraction("legacy-worker", &runtime.PendingInteraction{

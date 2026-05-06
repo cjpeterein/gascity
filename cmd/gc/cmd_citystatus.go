@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
@@ -128,6 +129,26 @@ func observeSessionTargetWithWarning(
 	target statusObservationTarget,
 	stderr io.Writer,
 ) worker.LiveObservation {
+	// Fast-path stopped sessions. StateCache answers IsRunning from a single
+	// cached `tmux list-panes -a` call shared across the whole status render,
+	// so this check is near-free. Skipping the rest avoids per-session
+	// GetMeta / ProcessAlive / IsAttached / GetLastActivity probes that each
+	// fork a tmux subprocess and dominated gc status latency (ga-8g8).
+	if sp != nil && target.runtimeSessionName != "" && !sp.IsRunning(target.runtimeSessionName) {
+		obs := worker.LiveObservation{
+			SessionName: target.runtimeSessionName,
+			SessionID:   target.sessionID,
+		}
+		if store != nil && target.sessionID != "" {
+			if bead, err := store.Get(target.sessionID); err == nil {
+				if strings.TrimSpace(bead.Metadata["state"]) == string(session.StateSuspended) {
+					obs.Suspended = true
+				}
+			}
+		}
+		return obs
+	}
+
 	if store != nil && target.sessionID != "" {
 		handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, target.sessionID)
 		if err == nil {

@@ -329,12 +329,19 @@ func (h *RuntimeHandle) PendingStatus(ctx context.Context) (*PendingInteraction,
 }
 
 // LiveObservation reports runtime presence metadata for a legacy runtime-only
-// worker target.
+// worker target. Metadata probes (suspended flag, session ID, attachment,
+// activity) are skipped when the runtime is not running: stopped sessions have
+// no retrievable metadata, and each skipped probe elides a provider call
+// (e.g. a tmux subprocess) that would otherwise fan out per agent slot on the
+// status path.
 func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, error) {
 	obs := LiveObservation{
 		Running:     h.provider.IsRunning(h.sessionName),
 		Alive:       false,
 		SessionName: h.sessionName,
+	}
+	if !obs.Running {
+		return obs, nil
 	}
 	if suspended, err := h.provider.GetMeta(h.sessionName, "suspended"); err == nil && strings.TrimSpace(suspended) == "true" {
 		obs.Suspended = true
@@ -342,13 +349,11 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	if sessionID, err := h.provider.GetMeta(h.sessionName, "GC_SESSION_ID"); err == nil {
 		obs.RuntimeSessionID = strings.TrimSpace(sessionID)
 	}
-	if obs.Running {
-		obs.Alive = h.provider.ProcessAlive(h.sessionName, h.processNames)
-		obs.Attached = h.provider.IsAttached(h.sessionName)
-		if last, err := h.provider.GetLastActivity(h.sessionName); err == nil && !last.IsZero() {
-			lastCopy := last
-			obs.LastActivity = &lastCopy
-		}
+	obs.Alive = h.provider.ProcessAlive(h.sessionName, h.processNames)
+	obs.Attached = h.provider.IsAttached(h.sessionName)
+	if last, err := h.provider.GetLastActivity(h.sessionName); err == nil && !last.IsZero() {
+		lastCopy := last
+		obs.LastActivity = &lastCopy
 	}
 	return obs, nil
 }

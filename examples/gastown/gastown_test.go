@@ -1563,3 +1563,117 @@ func TestDoltHealthFormulasExist(t *testing.T) {
 		t.Error("no formula files found")
 	}
 }
+
+// TestDeaconPatrolSweepsOrphanPolecatWorktrees asserts the deacon patrol
+// carries a worktree sweep step with the three-gate safety algorithm from
+// ga-isq: clean tree + no unmerged commits + mtime older than threshold.
+func TestDeaconPatrolSweepsOrphanPolecatWorktrees(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading deacon patrol formula: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`id = "orphan-worktree-sweep"`,
+		`.gc/worktrees`,
+		`polecats`,
+		`gc session list --json`,
+		`git status --porcelain`,
+		`git rev-list --count`,
+		`..HEAD`,
+		`git worktree remove`,
+		`git branch -D`,
+		`skip-sweep: alive-session`,
+		`skip-sweep: dirty-tree`,
+		`skip-sweep: unmerged-commits`,
+		`skip-sweep: too-young`,
+		`{{dry_run}}`,
+		`{{sweep_age_minutes}}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("deacon patrol formula missing orphan-worktree-sweep guidance %q", want)
+		}
+	}
+
+	if strings.Contains(body, `git worktree remove "$WORKTREE" --force`) ||
+		strings.Contains(body, `git worktree remove --force`) {
+		t.Errorf("deacon patrol orphan-worktree-sweep must not force-remove worktrees")
+	}
+
+	assertContainsInOrder(t, body,
+		`id = "orphan-worktree-sweep"`,
+		`gc session list --json`,
+		`git status --porcelain`,
+		`git rev-list --count`,
+		`git worktree remove`,
+		`git branch -D`,
+	)
+
+	// The sweep must run BEFORE health-scan so later steps can rely on a
+	// clean worktree inventory, and AFTER orphan-process-cleanup (both are
+	// leak-cleanup steps that share the same cadence).
+	assertContainsInOrder(t, body,
+		`id = "orphan-process-cleanup"`,
+		`id = "orphan-worktree-sweep"`,
+		`id = "health-scan"`,
+	)
+}
+
+// TestDeaconPatrolSweepDeclaresConfigVars asserts the formula declares the
+// vars the sweep step references, so pourers can override dry-run mode and
+// the age threshold via --var flags.
+func TestDeaconPatrolSweepDeclaresConfigVars(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading deacon patrol formula: %v", err)
+	}
+
+	var parsed struct {
+		Vars map[string]struct {
+			Description string `toml:"description"`
+			Default     string `toml:"default"`
+		} `toml:"vars"`
+	}
+	if _, err := toml.Decode(string(data), &parsed); err != nil {
+		t.Fatalf("decoding deacon patrol formula: %v", err)
+	}
+
+	for _, want := range []string{"dry_run", "sweep_age_minutes"} {
+		v, ok := parsed.Vars[want]
+		if !ok {
+			t.Errorf("mol-deacon-patrol [vars] missing %q", want)
+			continue
+		}
+		if v.Default == "" {
+			t.Errorf("mol-deacon-patrol [vars.%s] has empty default", want)
+		}
+		if v.Description == "" {
+			t.Errorf("mol-deacon-patrol [vars.%s] has empty description", want)
+		}
+	}
+}
+
+// TestDeaconPatrolVersionBumpedForWorktreeSweep asserts the formula version
+// advanced so poured wisps refresh to include the sweep step.
+func TestDeaconPatrolVersionBumpedForWorktreeSweep(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading deacon patrol formula: %v", err)
+	}
+	var parsed struct {
+		Version int `toml:"version"`
+	}
+	if _, err := toml.Decode(string(data), &parsed); err != nil {
+		t.Fatalf("decoding deacon patrol formula: %v", err)
+	}
+	if parsed.Version < 13 {
+		t.Errorf("mol-deacon-patrol version = %d, want >= 13 (bumped for orphan-worktree-sweep)", parsed.Version)
+	}
+}

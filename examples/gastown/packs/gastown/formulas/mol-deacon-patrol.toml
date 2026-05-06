@@ -46,12 +46,20 @@ between patrol cycles.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-deacon-patrol"
-version = 12
+version = 13
 
 [vars]
 [vars.event_timeout]
 description = "Seconds to wait for events before re-checking (exponential backoff)"
 default = "30"
+
+[vars.dry_run]
+description = "If 'true', orphan-worktree-sweep logs intent without removing anything. Use 'true' for the first few cycles in a new city to audit the candidate set before enabling real removal."
+default = "false"
+
+[vars.sweep_age_minutes]
+description = "Minimum mtime age (minutes) a worktree directory must exceed before orphan-worktree-sweep will consider removing it. Prevents racing against polecats that are mid-setup or about to claim work."
+default = "10"
 
 [[steps]]
 id = "check-inbox"
@@ -129,9 +137,124 @@ Use judgment — this is exactly why an LLM does it, not Go code.
 Close this step after check (even if no orphans found)."""
 
 [[steps]]
+id = "orphan-worktree-sweep"
+title = "Sweep orphan polecat worktrees"
+needs = ["orphan-process-cleanup"]
+description = """
+Belt-and-suspenders sweeper for polecat worktrees that outlived the
+mol-polecat-* self-cleanup (SIGKILL'd polecats, crashed sessions,
+formula regressions). The polecat formulas already gate their own
+drain-exit cleanup; this step catches leaks those gates could not
+reach.
+
+**Config: dry_run = {{dry_run}}**
+**Config: sweep_age_minutes = {{sweep_age_minutes}}**
+
+Only remove a worktree when ALL four gates pass. If any gate fails,
+log `skip-sweep: <reason>` with the path and leave the worktree
+(and its branch) intact. The witness and on-call humans rely on
+those artifacts to recover stranded work.
+
+**1. Enumerate candidates across every rig:**
+```bash
+CANDIDATES=$(find .gc/worktrees -mindepth 3 -maxdepth 3 -type d -path '*/polecats/*' 2>/dev/null)
+```
+If `.gc/worktrees` is missing or empty, there is nothing to sweep —
+exit the step silently (Idle Town Principle).
+
+**2. Collect alive session worktree paths** so the sweep never
+touches a directory a live polecat is actively using:
+```bash
+ALIVE=$(gc session list --json | jq -r '.[] | select(.Closed==false) | .WorkDir' | sort -u)
+```
+
+**3. For each candidate `$WORKTREE`, evaluate gates in order.**
+Enter a subshell so the per-candidate `cd` does not leak across the
+loop, then run plain `git` inside the worktree. The first failing
+gate wins — log and continue with the next candidate:
+
+  a. **Alive-session gate.** If any live session reports this path:
+     ```bash
+     if printf '%s\\n' "$ALIVE" | grep -Fxq "$WORKTREE"; then
+         echo "skip-sweep: alive-session $WORKTREE"
+         continue
+     fi
+     ```
+
+  b. **Too-young gate.** Directory mtime must exceed the configured
+     age threshold. Use `stat -f %m` on BSD/macOS and `stat -c %Y` on
+     GNU/Linux — try both so the formula runs on either host:
+     ```bash
+     MTIME=$(stat -f %m "$WORKTREE" 2>/dev/null || stat -c %Y "$WORKTREE" 2>/dev/null)
+     AGE_MIN=$(( ( $(date +%s) - MTIME ) / 60 ))
+     if [ "$AGE_MIN" -lt {{sweep_age_minutes}} ]; then
+         echo "skip-sweep: too-young $WORKTREE (age=${AGE_MIN}m)"
+         continue
+     fi
+     ```
+
+  c. **Dirty-tree gate.** Inside the worktree, `git status --porcelain`
+     must be empty:
+     ```bash
+     ( cd "$WORKTREE" && git status --porcelain ) > /tmp/gc-sweep-status.$$
+     if [ -s /tmp/gc-sweep-status.$$ ]; then
+         rm -f /tmp/gc-sweep-status.$$
+         echo "skip-sweep: dirty-tree $WORKTREE"
+         continue
+     fi
+     rm -f /tmp/gc-sweep-status.$$
+     ```
+
+  d. **Unmerged-commits gate.** No commits beyond the rig's base
+     branch. Resolve the base from `origin/HEAD`, fall back to `main`,
+     then fetch it quietly so the comparison is fresh. Inside the
+     worktree, use `git rev-list --count origin/$BASE..HEAD`:
+     ```bash
+     UNMERGED=$(
+         cd "$WORKTREE" || exit 1
+         BASE=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+         BASE=${BASE:-main}
+         git fetch --quiet origin "$BASE" 2>/dev/null || true
+         git rev-list --count "origin/${BASE}..HEAD" 2>/dev/null || echo 0
+     )
+     if [ "$UNMERGED" != "0" ]; then
+         echo "skip-sweep: unmerged-commits $WORKTREE"
+         continue
+     fi
+     ```
+
+**4. All gates passed — remove the worktree and its branch.**
+Never pass `--force` to `git worktree remove`; the gates ARE the
+safety. Capture the branch name from inside the worktree, then run
+`git worktree remove` and `git branch -D` from the parent repo's
+common dir:
+```bash
+BRANCH=$( cd "$WORKTREE" && git branch --show-current 2>/dev/null )
+REPO_ROOT=$( cd "$WORKTREE" && git rev-parse --git-common-dir | xargs -I{} dirname {} )
+
+if [ "{{dry_run}}" = "true" ]; then
+    echo "would-sweep: $WORKTREE (branch=${BRANCH:-<detached>})"
+    continue
+fi
+
+( cd "$REPO_ROOT" && git worktree remove "$WORKTREE" )
+if [ -n "$BRANCH" ] && [ "$BRANCH" != "HEAD" ]; then
+    ( cd "$REPO_ROOT" && git branch -D "$BRANCH" ) 2>/dev/null || true
+fi
+echo "swept: $WORKTREE (branch=${BRANCH:-<detached>})"
+```
+
+**Judgment note.** A single cycle will typically find zero or one
+candidates. If the sweep removes more than a handful per cycle, or
+if the same paths keep reappearing, escalate to mayor — that
+pattern means the polecat drain-exit cleanup is regressing upstream.
+
+Close this step after the candidate set has been fully evaluated."""
+
+[[steps]]
 id = "health-scan"
 title = "Check work-layer health"
-needs = ["orphan-process-cleanup"]
+needs = ["orphan-worktree-sweep"]
 description = """
 Monitor whether work is flowing through rig coordination agents.
 The controller handles "is the agent running?" The deacon handles

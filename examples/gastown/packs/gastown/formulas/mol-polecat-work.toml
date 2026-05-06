@@ -33,7 +33,7 @@ refinery. Resume the existing branch — don't redo all the work.
 | Unsure what to do | Mail Witness, don't guess |"""
 formula = "mol-polecat-work"
 extends = ["mol-polecat-base"]
-version = 9
+version = 10
 
 [[steps]]
 id = "workspace-setup"
@@ -183,14 +183,7 @@ but we never push with untracked work left behind.
 git push origin HEAD
 ```
 
-**3. Clean up local branch (prevent stale branch accumulation):**
-```bash
-BRANCH=$(git branch --show-current)
-git checkout --detach                 # Detach so we can delete the branch
-git branch -D "$BRANCH"              # Branch is pushed; refinery owns it now
-```
-
-**4. Update metadata on the work bead:**
+**3. Update metadata on the work bead:**
 ```bash
 gc bd update {{issue}} \
   --set-metadata target={{base_branch}} \
@@ -202,7 +195,7 @@ provided by the caller, `metadata.existing_pr` is preserved for refinery
 validation. The refinery records canonical `pr_url` only after verifying
 the PR is open and matches the branch, base, and origin repository.
 
-**5. Reassign to refinery:**
+**4. Reassign to refinery:**
 ```bash
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
 gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to="$REFINERY_TARGET"
@@ -223,6 +216,36 @@ The refinery will pick this up, rebase onto {{base_branch}}, run tests,
 merge, and close the bead. If there's a conflict, the refinery puts the
 bead back in the pool with `rejection_reason` metadata — a new polecat
 picks it up and resumes from the existing branch.
+
+**5. Gated drain-exit cleanup.**
+
+Remove the worktree and local branch only when the tree is clean AND every
+local commit is already reachable from `origin/{{base_branch}}`. Both gates
+must pass — if either fails, log the reason and leave the worktree and
+branch intact so the witness can salvage or prune them later.
+
+```bash
+BRANCH=$(git branch --show-current)
+WORKTREE_PATH=$(pwd)
+
+if [ -n "$(git status --porcelain)" ]; then
+    echo "skip-cleanup: working tree is dirty"
+elif [ "$(git rev-list --count origin/{{base_branch}}..HEAD)" -ne 0 ]; then
+    echo "skip-cleanup: HEAD has commits not in origin/{{base_branch}}"
+else
+    cd ..
+    git worktree remove "$WORKTREE_PATH"
+    if [ -n "$BRANCH" ]; then
+        git branch -D "$BRANCH"
+    fi
+    gc bd update {{issue}} --unset-metadata work_dir
+fi
+```
+
+Never pass `--force` to `git worktree remove`. The gates are the safety
+mechanism — force-remove would defeat them. In the normal polecat-work
+flow, gate 2 fails (the refinery hasn't merged yet) so the worktree and
+branch are preserved; that's the conservative, work-preserving default.
 
 **6. Signal reconciler and exit.**
 ```bash

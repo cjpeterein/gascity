@@ -226,6 +226,59 @@ func TestPolecatFormulaRecordsExistingPRMetadataOnSubmit(t *testing.T) {
 	}
 }
 
+func TestPolecatWorkFormulaGatesDrainExitCleanup(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`git status --porcelain`,
+		`git rev-list --count origin/{{base_branch}}..HEAD`,
+		`skip-cleanup: working tree is dirty`,
+		`skip-cleanup:`,
+		`git worktree remove "$WORKTREE_PATH"`,
+		`git branch -D "$BRANCH"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("polecat-work formula missing gated cleanup guidance %q", want)
+		}
+	}
+
+	if strings.Contains(body, `git worktree remove "$WORKTREE_PATH" --force`) {
+		t.Errorf("polecat-work formula must not force-remove worktree")
+	}
+
+	assertContainsInOrder(t, body,
+		`git status --porcelain`,
+		`git rev-list --count origin/{{base_branch}}..HEAD`,
+		`git worktree remove "$WORKTREE_PATH"`,
+		`git branch -D "$BRANCH"`,
+		`gc runtime drain-ack`,
+	)
+}
+
+func TestPolecatWorkFormulaVersionBumpedForDrainExitCleanup(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	var parsed struct {
+		Version int `toml:"version"`
+	}
+	if _, err := toml.Decode(string(data), &parsed); err != nil {
+		t.Fatalf("decoding polecat formula: %v", err)
+	}
+	if parsed.Version < 10 {
+		t.Errorf("mol-polecat-work version = %d, want >= 10 (bumped for gated drain-exit cleanup)", parsed.Version)
+	}
+}
+
 func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")

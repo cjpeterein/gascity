@@ -5508,3 +5508,220 @@ func TestPreserveConfiguredNamedSessionBead_StateGate(t *testing.T) {
 		})
 	}
 }
+
+// TestOpenWorkBeadSlotForSession_PrefersPoolSlotMetadata verifies that an
+// explicit metadata.pool_slot on a work bead is honored when present.
+func TestOpenWorkBeadSlotForSession_PrefersPoolSlotMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	cfgAgent := &config.Agent{Name: "polecat", Dir: "repo", MaxActiveSessions: intPtr(4)}
+
+	if _, err := store.Create(beads.Bead{
+		Title:    "work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "polecat-ci-xmulg",
+		Metadata: map[string]string{
+			"pool_slot": "4",
+			"work_dir":  "/ignored/polecats/polecat-2",
+		},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if got := openWorkBeadSlotForSession(store, "polecat-ci-xmulg", cfgAgent); got != 4 {
+		t.Fatalf("openWorkBeadSlotForSession = %d, want 4", got)
+	}
+}
+
+// TestOpenWorkBeadSlotForSession_ParsesWorkDir verifies fallback parsing of
+// metadata.work_dir against the agent's pool naming when pool_slot is unset.
+func TestOpenWorkBeadSlotForSession_ParsesWorkDir(t *testing.T) {
+	store := beads.NewMemStore()
+	cfgAgent := &config.Agent{Name: "polecat", Dir: "repo", MaxActiveSessions: intPtr(4)}
+
+	if _, err := store.Create(beads.Bead{
+		Title:    "work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "polecat-ci-xmulg",
+		Metadata: map[string]string{
+			"work_dir": "/city/.gc/worktrees/rig/polecats/polecat-4",
+		},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if got := openWorkBeadSlotForSession(store, "polecat-ci-xmulg", cfgAgent); got != 4 {
+		t.Fatalf("openWorkBeadSlotForSession = %d, want 4", got)
+	}
+}
+
+// TestOpenWorkBeadSlotForSession_MissingMetadataReturnsZero verifies the
+// helper returns 0 when no work bead carries a slot anchor.
+func TestOpenWorkBeadSlotForSession_MissingMetadataReturnsZero(t *testing.T) {
+	store := beads.NewMemStore()
+	cfgAgent := &config.Agent{Name: "polecat", Dir: "repo", MaxActiveSessions: intPtr(4)}
+
+	if _, err := store.Create(beads.Bead{
+		Title:    "work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "polecat-ci-xmulg",
+		// No pool_slot, no work_dir.
+		Metadata: map[string]string{
+			"branch": "gc-polecat-feature",
+		},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if got := openWorkBeadSlotForSession(store, "polecat-ci-xmulg", cfgAgent); got != 0 {
+		t.Fatalf("openWorkBeadSlotForSession = %d, want 0", got)
+	}
+}
+
+// TestOpenWorkBeadSlotForSession_IgnoresSessionBeads guards against the
+// helper treating a session bead's own pool_slot metadata as a work-bead
+// anchor.
+func TestOpenWorkBeadSlotForSession_IgnoresSessionBeads(t *testing.T) {
+	store := beads.NewMemStore()
+	cfgAgent := &config.Agent{Name: "polecat", Dir: "repo", MaxActiveSessions: intPtr(4)}
+
+	if _, err := store.Create(beads.Bead{
+		Title:    "session",
+		Type:     sessionBeadType,
+		Status:   "open",
+		Assignee: "polecat-ci-xmulg",
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"pool_slot":    "4",
+			"session_name": "polecat-ci-xmulg",
+		},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if got := openWorkBeadSlotForSession(store, "polecat-ci-xmulg", cfgAgent); got != 0 {
+		t.Fatalf("openWorkBeadSlotForSession = %d, want 0 (session bead ignored)", got)
+	}
+}
+
+// TestOpenWorkBeadSlotForSession_NilInputs exercises defensive guards.
+func TestOpenWorkBeadSlotForSession_NilInputs(t *testing.T) {
+	store := beads.NewMemStore()
+	cfgAgent := &config.Agent{Name: "polecat", Dir: "repo", MaxActiveSessions: intPtr(4)}
+
+	if got := openWorkBeadSlotForSession(nil, "polecat-ci-xmulg", cfgAgent); got != 0 {
+		t.Fatalf("nil store: got %d, want 0", got)
+	}
+	if got := openWorkBeadSlotForSession(store, "", cfgAgent); got != 0 {
+		t.Fatalf("empty sessionName: got %d, want 0", got)
+	}
+	// nil cfgAgent still supports generic trailing "-N" parsing.
+	if _, err := store.Create(beads.Bead{
+		Title:    "work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "polecat-ci-xmulg",
+		Metadata: map[string]string{
+			"work_dir": "/path/to/polecats/polecat-7",
+		},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := openWorkBeadSlotForSession(store, "polecat-ci-xmulg", nil); got != 7 {
+		t.Fatalf("nil cfgAgent: got %d, want 7 (generic trailing -N)", got)
+	}
+}
+
+// TestSyncDesiredPoolSlots_RaceReassignsSessionWithOpenWorkBead reproduces
+// the pool-slot-reassignment race described in ga-r27. A session bead whose
+// own pool_slot metadata is empty but which owns an open work bead pinned to
+// polecat-4 (via metadata.work_dir) must keep slot 4. This test FAILS on
+// current main because syncDesiredPoolSlots does not consult work beads; it
+// will pass once the sticky-slot guard (ga-vyh6) lands.
+func TestSyncDesiredPoolSlots_RaceReassignsSessionWithOpenWorkBead(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "gascity"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "rig",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(8),
+		}},
+	}
+
+	const sn1 = "polecat-ci-xmulg"
+	// Session bead for SN1: pool_slot intentionally empty (reproduces the
+	// race where existingPoolSlotWithConfig returns 0).
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "rig/polecat",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": sn1,
+			"template":     "rig/polecat",
+			"agent_name":   "rig/polecat",
+			"state":        "active",
+			// pool_slot: "" — session bead no longer records the slot.
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	// Open work bead assigned to SN1 with work_dir pinning polecat-4.
+	if _, err := store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "open",
+		Assignee: sn1,
+		Metadata: map[string]string{
+			"work_dir": "/tmp/city/.gc/worktrees/rig/polecats/polecat-4",
+			"branch":   "gc-polecat-feature",
+		},
+	}); err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+
+	desired := map[string]TemplateParams{
+		sn1: {
+			TemplateName: "rig/polecat",
+			InstanceName: sn1,
+			Alias:        "",
+			Command:      "claude",
+		},
+	}
+
+	openBeads := []beads.Bead{sessionBead}
+	indexBySessionName := map[string]int{sn1: 0}
+
+	var stderr bytes.Buffer
+	got := syncDesiredPoolSlots(store, desired, openBeads, indexBySessionName, cfg, clk.Now(), &stderr)
+
+	if len(got) != 1 {
+		t.Fatalf("syncDesiredPoolSlots returned %d beads, want 1", len(got))
+	}
+
+	// Assert the session was anchored to slot 4 by the open work bead.
+	// This FAILS on current code (returns "1" from nextSlot allocation)
+	// and will PASS once the sticky-slot guard wires openWorkBeadSlotForSession
+	// into syncDesiredPoolSlots.
+	if gotSlot := got[0].Metadata["pool_slot"]; gotSlot != "4" {
+		t.Fatalf("pool_slot = %q, want %q (session must stay on slot pinned by open work bead)", gotSlot, "4")
+	}
+
+	// Re-read from store to confirm the anchor was persisted, not just
+	// mutated in memory.
+	persisted, err := store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", sessionBead.ID, err)
+	}
+	if gotSlot := persisted.Metadata["pool_slot"]; gotSlot != "4" {
+		t.Fatalf("persisted pool_slot = %q, want %q", gotSlot, "4")
+	}
+}

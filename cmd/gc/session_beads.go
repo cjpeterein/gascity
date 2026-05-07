@@ -1498,6 +1498,90 @@ func syncDesiredPoolSlots(
 	return openBeads
 }
 
+// openWorkBeadSlotForSession returns the pool slot a session is anchored to by
+// an open work bead, or 0 when no anchor is found. This lets the reconciler
+// keep a polecat on the slot whose worktree holds its in-flight diff, even
+// when the session bead's own metadata no longer records the slot (see
+// ga-r27 for the reassignment race this guards against).
+//
+// The helper scans non-session beads assigned to sessionName and prefers
+// metadata.pool_slot, falling back to parsing the basename of
+// metadata.work_dir against cfgAgent's pool instance naming. A returned slot
+// is only advisory: callers must still honor configured bounds and contention.
+func openWorkBeadSlotForSession(store beads.Store, sessionName string, cfgAgent *config.Agent) int {
+	sessionName = strings.TrimSpace(sessionName)
+	if store == nil || sessionName == "" {
+		return 0
+	}
+	workBeads, err := store.List(beads.ListQuery{
+		Assignee: sessionName,
+	})
+	if err != nil {
+		return 0
+	}
+	for _, b := range workBeads {
+		if b.Type == sessionBeadType {
+			continue
+		}
+		if hasSessionBeadLabel(b) {
+			continue
+		}
+		if slot := workBeadPoolSlot(b, cfgAgent); slot > 0 {
+			return slot
+		}
+	}
+	return 0
+}
+
+// workBeadPoolSlot extracts the pool slot a work bead pins, first from
+// metadata.pool_slot and then by parsing metadata.work_dir against the
+// agent's pool instance naming. Returns 0 when neither yields a positive
+// slot.
+func workBeadPoolSlot(b beads.Bead, cfgAgent *config.Agent) int {
+	if raw := strings.TrimSpace(b.Metadata["pool_slot"]); raw != "" {
+		if slot, err := strconv.Atoi(raw); err == nil && slot > 0 {
+			return slot
+		}
+	}
+	return slotFromWorkDirPath(b.Metadata["work_dir"], cfgAgent)
+}
+
+// slotFromWorkDirPath parses the trailing pool-instance segment of workDir
+// (e.g. ".../polecats/polecat-4" -> 4) against cfgAgent's naming, falling
+// back to a generic "-<N>" suffix match. Returns 0 when no slot is encoded.
+func slotFromWorkDirPath(workDir string, cfgAgent *config.Agent) int {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return 0
+	}
+	base := filepath.Base(workDir)
+	if cfgAgent != nil {
+		if slot := resolvePoolSlot(base, cfgAgent.QualifiedName()); slot > 0 {
+			return slot
+		}
+		if bq := cfgAgent.BindingQualifiedName(); bq != "" && bq != cfgAgent.QualifiedName() {
+			if slot := resolvePoolSlot(base, bq); slot > 0 {
+				return slot
+			}
+		}
+		if cfgAgent.Name != "" {
+			if slot := resolvePoolSlot(base, cfgAgent.Name); slot > 0 {
+				return slot
+			}
+		}
+	}
+	return parsePoolSlot(base)
+}
+
+func hasSessionBeadLabel(b beads.Bead) bool {
+	for _, label := range b.Labels {
+		if label == sessionBeadLabel {
+			return true
+		}
+	}
+	return false
+}
+
 // configuredSessionNames builds the set of controller-owned configured session
 // names from the config, including suspended entries. Used to distinguish
 // "orphaned" (no longer controller-owned) from "suspended" (still configured,

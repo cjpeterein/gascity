@@ -23,6 +23,13 @@ stderr 'no longer performs in-place PackV1-to-PackV2 rewrites'
 exec grep '^includes = ' $WORK/legacy-city/city.toml
 exec grep 'default_rig_includes = \["../packs/default rig"\]' $WORK/legacy-city/city.toml
 
+# Rig-scoped user agents get a matching [[named_session]] synthesized in city.toml.
+exists $WORK/legacy-city/agents/wolf/agent.toml
+exec grep '\[\[named_session\]\]' $WORK/legacy-city/city.toml
+exec grep 'template = "wolf"' $WORK/legacy-city/city.toml
+exec grep 'dir = "myproject"' $WORK/legacy-city/city.toml
+exec grep 'mode = "always"' $WORK/legacy-city/city.toml
+
 -- legacy-city/city.toml --
 [workspace]
 name = "legacy-city"
@@ -37,8 +44,17 @@ overlay_dir = "overlays/mayor"
 namepool = "namepools/mayor.txt"
 fallback = true
 
+[[agent]]
+name = "wolf"
+dir = "myproject"
+scope = "rig"
+prompt_template = "prompts/wolf.md"
+
 -- legacy-city/prompts/mayor.md --
 Hello {{.Agent}}
+
+-- legacy-city/prompts/wolf.md --
+howl
 
 -- legacy-city/overlays/mayor/CLAUDE.md --
 overlay

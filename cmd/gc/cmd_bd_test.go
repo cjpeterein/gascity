@@ -141,13 +141,7 @@ func TestExtractBdScopeFlags(t *testing.T) {
 }
 
 func TestResolveBdScopeTarget(t *testing.T) {
-	// Isolate cwd from any ambient `.beads/redirect` in the working tree
-	// (e.g. when `make test` runs from a polecat/crew worktree, the worktree's
-	// redirect resolves to a path outside the synthetic rig config below and
-	// `rigFromRedirectedBeadsDir` rejects it). t.TempDir's ancestry is /tmp,
-	// which is guaranteed to be free of city redirects.
-	setCwd(t, t.TempDir())
-
+	isolateBdCwd(t)
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
 	bdBeadExists = func(_ string, _ execStoreTarget, beadID string) bool {
@@ -305,6 +299,54 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 	_, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
 	if err == nil || !strings.Contains(err.Error(), "points outside declared city rigs") {
 		t.Fatalf("resolveBdScopeTarget() error = %v, want foreign redirect error", err)
+	}
+}
+
+// TestIsolateBdCwdEscapesAmbientRedirectAbove is a regression test for
+// gc-2x5: resolveBdScopeTarget walks upward from the process CWD looking
+// for .beads/redirect. When the outer checkout is a refinery or polecat
+// worktree — whose redirect points at the real shared rig store, not the
+// test's synthesized city — the ambient redirect leaks into any test that
+// exercises CWD fallback. isolateBdCwd chdirs to a fresh tempdir so the
+// upward walk cannot reach those ambient redirects.
+func TestIsolateBdCwdEscapesAmbientRedirectAbove(t *testing.T) {
+	outer := t.TempDir()
+	foreign := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(outer, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(outer .beads): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outer, ".beads", "redirect"), []byte(filepath.Join(foreign, ".beads")+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(redirect): %v", err)
+	}
+	inner := filepath.Join(outer, "inner")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatalf("MkdirAll(inner): %v", err)
+	}
+	setCwd(t, inner)
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "repo", Path: filepath.Join("rigs", "repo"), Prefix: "de"}},
+	}
+
+	// Sanity: from `inner`, the ambient redirect above `outer` leaks into
+	// resolveBdScopeTarget and produces the "points outside" error.
+	if _, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}); err == nil ||
+		!strings.Contains(err.Error(), "points outside declared city rigs") {
+		t.Fatalf("sanity check: expected ambient redirect to surface, got err=%v", err)
+	}
+
+	// With isolateBdCwd the walk starts from a hermetic tempdir whose
+	// ancestors do not contain the outer redirect, so resolution falls
+	// back cleanly to the city scope.
+	isolateBdCwd(t)
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() after isolateBdCwd: error = %v", err)
+	}
+	if got.ScopeKind != "city" {
+		t.Fatalf("ScopeKind = %q, want %q", got.ScopeKind, "city")
 	}
 }
 
@@ -560,6 +602,7 @@ set -eu
 }
 
 func TestGcBdSuppressesBdAutoExportInChildEnv(t *testing.T) {
+	isolateBdCwd(t)
 	disableManagedDoltRecoveryForTest(t)
 
 	origCityFlag := cityFlag
@@ -678,6 +721,7 @@ printf '[{"id":"gc-1","title":"ok"}]\n'
 }
 
 func TestGcBdDoesNotAutoRouteHyphenatedFlagValue(t *testing.T) {
+	isolateBdCwd(t)
 	disableManagedDoltRecoveryForTest(t)
 
 	origCityFlag := cityFlag
@@ -771,6 +815,14 @@ set -eu
 }
 
 func TestGcBdRejectsGCBeadsFileOverride(t *testing.T) {
+	isolateBdCwd(t)
+	// The ambient gc runtime that hosts polecat sessions exports
+	// GC_BEADS_SCOPE_ROOT / GC_BEADS_PREFIX pointing at the real rig
+	// store. Without unsetting them, rawBeadsProviderForScope falls back
+	// to the scope-root config lookup and reports "bd" instead of honoring
+	// the test's GC_BEADS="file" override, leading to a spurious success.
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_BEADS_PREFIX", "")
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	defer func() {
@@ -806,7 +858,7 @@ name = "demo"
 
 	var stdout, stderr bytes.Buffer
 	if got := doBd([]string{"list"}, &stdout, &stderr); got == 0 {
-		t.Fatalf("doBd() = %d, want non-zero", got)
+		t.Fatalf("doBd() = %d, want non-zero; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "only supported for bd-backed beads providers") {
 		t.Fatalf("stderr = %q, want provider error", stderr.String())
@@ -814,6 +866,7 @@ name = "demo"
 }
 
 func TestGcBdRejectsNonBdProvider(t *testing.T) {
+	isolateBdCwd(t)
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
 	defer func() {

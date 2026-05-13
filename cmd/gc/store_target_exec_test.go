@@ -156,6 +156,7 @@ func TestGcExecLifecycleInitProcessEnvDoesNotProjectCanonicalFilesOwnedFlagForGc
 
 func TestGcExecLifecycleInitProcessEnvDoesNotLeakAmbientBEADS_DIRForGcBeadsK8s(t *testing.T) {
 	cityDir := t.TempDir()
+	registerBeadsProviderCleanup(t, cityDir)
 	rigDir := filepath.Join(cityDir, "rigs", "frontend")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatal(err)

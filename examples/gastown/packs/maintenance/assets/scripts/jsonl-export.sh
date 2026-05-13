@@ -23,8 +23,14 @@ PACK_STATE_DIR="${GC_PACK_STATE_DIR:-${GC_CITY_RUNTIME_DIR:-$CITY/.gc/runtime}/p
 LEGACY_ARCHIVE_REPO="$CITY/.gc/jsonl-archive"
 LEGACY_STATE_FILE="$CITY/.gc/jsonl-export-state.json"
 
-# Configurable via environment (defaults match the old formula).
-SPIKE_THRESHOLD="${GC_JSONL_SPIKE_THRESHOLD:-20}"  # percentage (0-100)
+# Configurable via environment.
+# SPIKE_THRESHOLD is the percent-delta record-count swing between exports that
+# trips a HIGH-severity escalation. 100 means "record count doubled (or more
+# than halved)"; normal multi-agent activity produces 20-80% swings per export
+# cycle, so a tighter default creates false positives that train operators to
+# archive spike alerts without reading them (see gc-4nd). Operators who want
+# the old tighter default can set GC_JSONL_SPIKE_THRESHOLD=20.
+SPIKE_THRESHOLD="${GC_JSONL_SPIKE_THRESHOLD:-100}"  # percentage
 # Skip the percentage spike check when the previous record count is below
 # this absolute floor — small-N percentages are noise. A fresh bead store
 # growing 10→309 records during stand-up legitimately trips a 20% delta on

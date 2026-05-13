@@ -43,7 +43,7 @@ This is infrastructure work. You:
 |----------|--------|-------------|
 | databases | config | List of databases to export |
 | scrub | config | Whether to filter ephemeral data (default true) |
-| spike_threshold | config | Max allowed pct change between exports (default 0.20) |
+| spike_threshold | config | Max allowed pct change between exports (default 1.00) |
 
 ## Safety
 
@@ -65,8 +65,8 @@ description = "Whether to filter ephemeral data from exports"
 default = "true"
 
 [vars.spike_threshold]
-description = "Maximum allowed percentage change in record counts between exports (0.0-1.0)"
-default = "0.20"
+description = "Maximum allowed percentage change in record counts between exports (0.0+); 1.00 means a doubling, 2.00 means a tripling"
+default = "1.00"
 
 [vars.max_push_failures]
 description = "Consecutive push failures before escalation"
@@ -122,8 +122,9 @@ Remove records matching test and system patterns from exported JSONL:
 Compare current export record counts against previous commit.
 
 **3. Evaluate results:**
-- If delta > {{spike_threshold}} (default 20%) for ANY database -> HALT after
-  committing the refreshed export locally so the baseline advances
+- If delta > {{spike_threshold}} (default 100%, i.e. a doubling) for ANY
+  database -> HALT after committing the refreshed export locally so the
+  baseline advances
 - Log anomalies: sudden jumps = pollution, sudden drops = data loss
 - Escalate to Mayor:
   ```bash

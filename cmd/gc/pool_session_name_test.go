@@ -123,6 +123,40 @@ func TestPoolSessionName(t *testing.T) {
 	}
 }
 
+// TestPoolSessionNameForInstance covers the "<rig>--<name>-<beadID>" form
+// that new pool-slot spawns use. The rig prefix and themed name are
+// front-loaded so tmux list-sessions output tells an operator which rig
+// the polecat belongs to and what its themed identity is (instead of the
+// legacy "{template}-{beadID}" form that stripped the rig prefix). The
+// bead ID stays on the tail to preserve per-bead uniqueness for the
+// session-name reservation machinery.
+func TestPoolSessionNameForInstance(t *testing.T) {
+	tests := []struct {
+		name              string
+		qualifiedInstance string
+		beadID            string
+		want              string
+	}{
+		{"themed pool member", "gascity/furiosa", "em-abc", "gascity--furiosa-em-abc"},
+		{"unthemed pool slot", "gascity/polecat-2", "em-xyz", "gascity--polecat-2-em-xyz"},
+		{"single-rig qualified instance", "myrig/codex-1", "mc-123", "myrig--codex-1-mc-123"},
+		{"bare instance (no rig)", "claude", "mc-abc", "claude-mc-abc"},
+		{"dotted qualified instance", "myrig/gs.polecat-1", "mc-rigdot", "myrig--gs__polecat-1-mc-rigdot"},
+		{"empty instance returns empty", "", "em-abc", ""},
+		{"empty beadID returns empty", "gascity/furiosa", "", ""},
+		{"whitespace returns empty", "   ", "em-abc", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PoolSessionNameForInstance(tt.qualifiedInstance, tt.beadID)
+			if got != tt.want {
+				t.Errorf("PoolSessionNameForInstance(%q, %q) = %q, want %q",
+					tt.qualifiedInstance, tt.beadID, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGCSweepSessionBeads_ClosesOrphans(t *testing.T) {
 	store := beads.NewMemStore()
 

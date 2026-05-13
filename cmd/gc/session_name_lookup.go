@@ -170,7 +170,10 @@ func createPoolSessionBead(
 	if err != nil {
 		return beads.Bead{}, err
 	}
-	sessionName := PoolSessionName(template, bead.ID)
+	sessionName := PoolSessionNameForInstance(agentName, bead.ID)
+	if sessionName == "" {
+		sessionName = PoolSessionName(template, bead.ID)
+	}
 	if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
 		_ = store.Close(bead.ID)
 		return beads.Bead{}, err

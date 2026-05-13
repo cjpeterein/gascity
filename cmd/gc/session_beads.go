@@ -102,6 +102,16 @@ func beadOwnsPoolSessionName(b beads.Bead) bool {
 	if id == "" || sn == "" {
 		return false
 	}
+	// New format: "<rig>--<name>-<beadID>" derived from the agent_name
+	// (qualified instance) plus the bead ID. Pool-managed beads carry the
+	// qualified instance in agent_name, so the session_name equals
+	// PoolSessionNameForInstance on that value.
+	if agentName := strings.TrimSpace(b.Metadata["agent_name"]); agentName != "" {
+		if sn == PoolSessionNameForInstance(agentName, id) {
+			return true
+		}
+	}
+	// Legacy format: "{basename(template)}-{beadID}".
 	if template := strings.TrimSpace(b.Metadata["template"]); template != "" && sn == PoolSessionName(template, id) {
 		return true
 	}
@@ -1024,7 +1034,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			finalizeCreatedSessionName := func() {
 				createdSessionName = strings.TrimSpace(newBead.Metadata["session_name"])
 				if isPoolInstance {
-					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
+					createdSessionName = PoolSessionNameForInstance(agentName, newBead.ID)
+					if createdSessionName == "" {
+						createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
+					}
 					if err := store.SetMetadata(newBead.ID, "session_name", createdSessionName); err != nil {
 						finalizeErr = err
 						fmt.Fprintf(stderr, "session beads: setting pool session_name for %s: %v\n", agentName, err) //nolint:errcheck

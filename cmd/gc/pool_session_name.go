@@ -47,12 +47,42 @@ type releasedPoolAssignment struct {
 	Index int
 }
 
-// PoolSessionName derives the tmux session name for a pool worker session.
-// Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
-// Named sessions with an alias use the alias instead.
+// PoolSessionName derives the legacy tmux session name for a pool worker
+// session from its template and bead ID. Format:
+// "{basename(template)}-{beadID}" (e.g., "claude-mc-xyz").
+//
+// Call sites that spawn pool slots should prefer
+// PoolSessionNameForInstance, which produces the "<rig>--<name>" form
+// matching the convention used by crew members and pack-built-in roles.
+// PoolSessionName stays unchanged so historical session_name metadata on
+// older beads can still be recognized (see beadOwnsPoolSessionName).
 func PoolSessionName(template, beadID string) string {
 	base := path.Base(template)
 	return agent.SanitizeQualifiedNameForSession(base) + "-" + beadID
+}
+
+// PoolSessionNameForInstance derives the tmux session name for a pool
+// worker session from its qualified instance name (e.g. "gascity/furiosa"
+// or "gascity/polecat-2") and bead ID.
+//
+// The result is "<sanitized-qualified-instance>-<beadID>" — e.g.
+// "gascity--furiosa-em-abc" — so pool members carry the rig and themed
+// name at the front (matching the "<rig>--<name>" prefix used by crew
+// members and pack-built-in roles) while keeping the bead ID suffix for
+// per-session uniqueness and reservation semantics. A tmux operator
+// running `tmux list-sessions` can now see at a glance which rig a
+// polecat belongs to and what its themed name is, without losing the
+// identifier that disambiguates restarts.
+//
+// Returns "" when qualifiedInstance or beadID is empty; callers should
+// fall back to PoolSessionName in that case.
+func PoolSessionNameForInstance(qualifiedInstance, beadID string) string {
+	qi := strings.TrimSpace(qualifiedInstance)
+	id := strings.TrimSpace(beadID)
+	if qi == "" || id == "" {
+		return ""
+	}
+	return agent.SanitizeQualifiedNameForSession(qi) + "-" + id
 }
 
 // GCSweepSessionBeads closes open session beads that have no remaining

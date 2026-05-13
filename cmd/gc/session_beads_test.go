@@ -2680,6 +2680,30 @@ func TestBeadOwnsPoolSessionName(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "instance-derived name (themed)",
+			bead: beads.Bead{
+				ID: "gc-5",
+				Metadata: map[string]string{
+					"template":     "gascity/polecat",
+					"agent_name":   "gascity/furiosa",
+					"session_name": "gascity--furiosa-gc-5",
+				},
+			},
+			want: true,
+		},
+		{
+			name: "instance-derived name (unthemed slot)",
+			bead: beads.Bead{
+				ID: "gc-6",
+				Metadata: map[string]string{
+					"template":     "myrig/codex",
+					"agent_name":   "myrig/codex-2",
+					"session_name": "myrig--codex-2-gc-6",
+				},
+			},
+			want: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -3842,6 +3842,78 @@ func TestJsonlExportScrubTrueFiltersRowsWithoutDroppingWholePayload(t *testing.T
 	}
 }
 
+// Regression for gc-smh: the dispatcher's order-tracking beads (title
+// "order:<scoped>", created and closed by every patrol tick) were polluting
+// the jsonl archive and tripping the spike dog on its own bookkeeping. The
+// scrub step must drop them so the recorded count tracks real work only.
+func TestJsonlExportScrubFiltersOrderTrackingBeads(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	initSeedArchive(t, archiveRepo, 12)
+
+	// Simulate an idle rig one hour in: 12 legitimate rows plus 100 closed
+	// tracking beads the dispatcher synthesized while the rig produced zero
+	// real work. Without the scrub, current_count jumps from 12 -> 112 and
+	// the spike dog escalates.
+	rows := make([]string, 0, 112)
+	for i := range 12 {
+		rows = append(rows, fmt.Sprintf(`{"id":"prod-%d","title":"real-%d"}`, i, i))
+	}
+	for i := range 100 {
+		rows = append(rows, fmt.Sprintf(`{"id":"ot-%d","title":"order:mol-dog-jsonl"}`, i))
+	}
+	writeIssueRowsDoltStub(t, binDir, rows)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	env["GC_JSONL_SCRUB"] = "true"
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	mailData, err := os.ReadFile(mailLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(mail log): %v", err)
+	}
+	if strings.Contains(string(mailData), "ESCALATION: JSONL spike") {
+		t.Fatalf("order-tracking beads must not trip the spike dog after scrub; mail log:\n%s", mailData)
+	}
+
+	exported, err := os.ReadFile(filepath.Join(archiveRepo, "beads", "issues.jsonl"))
+	if err != nil {
+		t.Fatalf("ReadFile(issues.jsonl): %v", err)
+	}
+	if got := strings.Count(string(exported), `"id":`); got != 12 {
+		t.Fatalf("expected scrubbed export to retain 12 legitimate rows, got %d rows:\n%s", got, exported)
+	}
+	if strings.Contains(string(exported), `"title":"order:`) {
+		t.Fatalf("expected scrubbed export to drop every order-tracking row, got:\n%s", exported)
+	}
+
+	legacyExported, err := os.ReadFile(filepath.Join(archiveRepo, "beads.jsonl"))
+	if err != nil {
+		t.Fatalf("ReadFile(beads.jsonl): %v", err)
+	}
+	if got := strings.Count(string(legacyExported), `"id":`); got != 12 {
+		t.Fatalf("expected legacy flat export to retain 12 legitimate rows, got %d rows:\n%s", got, legacyExported)
+	}
+	if strings.Contains(string(legacyExported), `"title":"order:`) {
+		t.Fatalf("expected legacy flat export to drop every order-tracking row, got:\n%s", legacyExported)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "records: 12") {
+		t.Fatalf("expected DOG_DONE summary to report the scrubbed record count, got:\n%s", gcData)
+	}
+}
+
 func TestJsonlExportHaltCommitAdvancesBaselineWithoutLocalGitIdentity(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()

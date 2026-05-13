@@ -50,12 +50,19 @@ count_jsonl_rows() {
 # Scrub test-only rows while preserving the JSON export structure and legitimate
 # rows in the same payload. The input is one JSON object with a .rows array, not
 # newline-delimited JSON, so row-level filtering must happen inside jq.
+#
+# Also drop order-tracking beads — created/closed by the dispatcher for every
+# patrol tick with title "order:<scoped>". Leaving them in the export trips the
+# jsonl spike dog on its own bookkeeping (gastownhall/gascity gc-smh): idle rigs
+# accumulate ~165 tracking beads/hour with zero real work, and the percentage
+# delta against a near-zero baseline triggers continuous spike alerts.
 scrub_exported_issues() {
     jq -c '
         if (.rows? | type) == "array" then
             .rows |= map(
                 select(
                     ((.title // "") | test("^(Test Issue|test_)") | not) and
+                    ((.title // "") | test("^order:") | not) and
                     (
                         (
                             (.id // "") == "bd-1" or
@@ -640,7 +647,11 @@ fi
 # Build scrub filter for the issues table.
 SCRUB_FILTER=""
 if [ "$SCRUB" = "true" ]; then
-    SCRUB_FILTER="WHERE issue_type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%'"
+    # 'order:%' titles are the dispatcher's internal order-tracking beads
+    # (2 commits per patrol tick, 100+/hour on idle rigs). Filtering at the
+    # SQL layer keeps the pipeline honest: the row never hits jq or the
+    # archive, so the spike-detection count reflects real work only.
+    SCRUB_FILTER="WHERE issue_type NOT IN ('message', 'event', 'wisp', 'agent') AND title NOT LIKE 'gc:%' AND title NOT LIKE 'order:%'"
 fi
 
 TOTAL_EXPORTED=0

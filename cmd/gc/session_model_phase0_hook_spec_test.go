@@ -20,6 +20,7 @@ func TestPhase0Hook_UsesGCTemplateForConfigLookupInSessionContext(t *testing.T) 
 	cityDir := t.TempDir()
 	requireNoLeakedDoltAfterForPaths(t, cityDir)
 	workDir := t.TempDir()
+	registerBeadsProviderCleanup(t, cityDir)
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -82,6 +83,7 @@ func TestPhase0Hook_AliaslessOrdinarySessionUsesGCTemplateForConfigLookup(t *tes
 	cityDir := t.TempDir()
 	requireNoLeakedDoltAfterForPaths(t, cityDir)
 	workDir := t.TempDir()
+	registerBeadsProviderCleanup(t, cityDir)
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -140,6 +142,7 @@ func TestPhase0Hook_NamedSessionContextPreservesExactOwnerEnv(t *testing.T) {
 	requireNoLeakedDoltAfterForPaths(t, cityDir)
 	workDir := t.TempDir()
 	fakeBin := t.TempDir()
+	registerBeadsProviderCleanup(t, cityDir)
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)

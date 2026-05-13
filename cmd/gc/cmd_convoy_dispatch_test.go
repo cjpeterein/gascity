@@ -5160,6 +5160,7 @@ provider = "file"
 
 func TestFindBeadAcrossStoresPropagatesCityStoreErrors(t *testing.T) {
 	cityPath := t.TempDir()
+	registerBeadsProviderCleanup(t, cityPath)
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
 name = "test-city"
 `), 0o644); err != nil {

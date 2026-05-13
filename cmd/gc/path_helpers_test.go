@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,9 +14,31 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+// newControllerStateTest wraps newControllerState with a cleanup that stops
+// the managed dolt sql-server spawned for cityPath, if any. Use this in
+// tests that previously called newControllerState directly — newControllerState
+// opens a city bead store which, when GC_BEADS=bd is set (explicit or
+// inherited from the parent shell), spawns a dolt server that outlives
+// t.TempDir() removal. gc-ucmw.
+func newControllerStateTest(
+	t *testing.T,
+	ctx context.Context,
+	cfg *config.City,
+	sp runtime.Provider,
+	ep events.Provider,
+	cityName, cityPath string,
+) *controllerState {
+	t.Helper()
+	registerBeadsProviderCleanup(t, cityPath)
+	return newControllerState(ctx, cfg, sp, ep, cityName, cityPath)
+}
 
 func canonicalTestPath(path string) string {
 	return testutil.CanonicalPath(path)
@@ -44,6 +67,25 @@ func clearInheritedBeadsEnv(t *testing.T) {
 		}
 		t.Setenv(key, "")
 	}
+}
+
+// registerBeadsProviderCleanup registers a t.Cleanup that stops the managed
+// dolt sql-server spawned for cityPath, if any. Use this in tests that touch
+// the beads provider (openCityStoreAt, newControllerState, cmdHook with
+// GC_BEADS=bd inherited from the shell, and so on) so the server is reaped
+// when the test exits. Without this cleanup the dolt server outlives
+// t.TempDir() removal and leaks into the host process table (gc-ucmw).
+//
+// Pair with requireNoLeakedDoltAfterForPaths: cleanup prevents the leak;
+// requireNoLeakedDoltAfterForPaths fails the test when cleanup is missed.
+func registerBeadsProviderCleanup(t *testing.T, cityPath string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if cityPath == "" {
+			return
+		}
+		_ = shutdownBeadsProvider(cityPath)
+	})
 }
 
 // requireNoLeakedDoltAfter snapshots the live test-owned dolt sql-server PIDs

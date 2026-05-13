@@ -81,6 +81,7 @@ scrub_exported_issues() {
             .rows |= map(
                 select(
                     ((.title // "") | test("^(Test Issue|test_)") | not) and
+                    ((.title // "") | test("^order:") | not) and
                     (
                         (
                             (.id // "") == "bd-1" or

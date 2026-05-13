@@ -498,7 +498,7 @@ func TestDerivePoolSessionName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := derivePoolSessionName(nil, nil, tt.template, tt.beadID, tt.alias, tt.snapshot)
+			got, err := derivePoolSessionName(nil, nil, tt.template, "", tt.beadID, tt.alias, tt.snapshot)
 			if err != nil {
 				t.Fatalf("derivePoolSessionName: %v", err)
 			}
@@ -518,7 +518,7 @@ func TestDerivePoolSessionNameRejectsInvalidCollisionSuffix(t *testing.T) {
 		},
 	}})
 
-	_, err := derivePoolSessionName(nil, nil, "crew", "gc-1", strings.Repeat("a", 64), snapshot)
+	_, err := derivePoolSessionName(nil, nil, "crew", "", "gc-1", strings.Repeat("a", 64), snapshot)
 	if err == nil {
 		t.Fatal("derivePoolSessionName: want error when collision suffix would exceed explicit session name length")
 	}

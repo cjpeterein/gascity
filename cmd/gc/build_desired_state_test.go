@@ -7152,11 +7152,13 @@ func TestBuildDesiredState_UsesBeadNamedPoolSessionsForScaleCheckDemand(t *testi
 	if tp.TemplateName != "worker" {
 		t.Fatalf("TemplateName = %q, want worker", tp.TemplateName)
 	}
-	if !strings.HasPrefix(sessionName, "worker-") {
-		t.Fatalf("session name = %q, want worker-<beadID>", sessionName)
-	}
-	if strings.HasSuffix(sessionName, "-1") {
-		t.Fatalf("session name = %q, want bead-derived name instead of slot alias", sessionName)
+	// The session_name carries the qualified-instance prefix ("worker-1-")
+	// and a bead ID suffix. For a bare pool slot ("worker-1") that is
+	// "worker-1-<beadID>" — the rig prefix part is empty so the instance
+	// name sits at the front directly. Uniqueness via the bead ID keeps
+	// session-name reservation semantics unchanged.
+	if !strings.HasPrefix(sessionName, "worker-1-") {
+		t.Fatalf("session name = %q, want worker-1-<beadID> prefix", sessionName)
 	}
 
 	sessionBeads, err := store.ListByLabel(sessionBeadLabel, 0)

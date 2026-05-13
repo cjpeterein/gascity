@@ -195,7 +195,7 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	testscript.Main(m, map[string]func(){
+	testscript.Main(doltReapingTestingM{inner: m, w: os.Stderr}, map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
 			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

@@ -90,6 +90,14 @@ func newTestCityRuntime(t *testing.T, params CityRuntimeParams) *CityRuntime {
 			cancelInflight(od)
 		}
 		cr.shutdown()
+		// cr.shutdown stops workspace services but does not reach the
+		// beads provider. When GC_BEADS=bd (explicit or inherited) the
+		// first bead-store open under cr.cityPath spawns a managed dolt
+		// sql-server; without this cleanup the server outlives the test
+		// and leaks into the host process table (gc-ucmw).
+		if params.CityPath != "" {
+			_ = shutdownBeadsProvider(params.CityPath)
+		}
 	})
 	return cr
 }
@@ -462,8 +470,10 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 		events: orderEvents,
 	}
 	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	registerBeadsProviderCleanup(t, cityPath)
 	cr := &CityRuntime{
-		cityPath: t.TempDir(),
+		cityPath: cityPath,
 		cityName: "test-city",
 		cfg:      &config.City{},
 		sp:       sp,
@@ -487,7 +497,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 			return ""
 		},
 	}
-	cs := newControllerState(context.Background(), cr.cfg, sp, events.NewFake(), "test-city", cr.cityPath)
+	cs := newControllerStateTest(t, context.Background(), cr.cfg, sp, events.NewFake(), "test-city", cr.cityPath)
 	cs.cityBeadStore = store
 	cr.setControllerState(cs)
 
@@ -617,7 +627,7 @@ func TestCityRuntimeRunStartupPreflightsManagedDoltBeforeSessionSnapshot(t *test
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = store
 	cr.setControllerState(cs)
 	orderEvents.reset()
@@ -666,7 +676,7 @@ func TestCityRuntimeControlDispatcherPreflightsManagedDoltBeforeSessionSnapshot(
 			return ""
 		},
 	}
-	cs := newControllerState(context.Background(), cr.cfg, sp, events.NewFake(), "test-city", cr.cityPath)
+	cs := newControllerStateTest(t, context.Background(), cr.cfg, sp, events.NewFake(), "test-city", cr.cityPath)
 	cs.cityBeadStore = store
 	cr.setControllerState(cs)
 
@@ -684,6 +694,7 @@ func TestNewCityRuntimePreflightsManagedDoltPublicationBeforeStartupStoreWork(t 
 
 	healthCalls := 0
 	cityPath := t.TempDir()
+	registerBeadsProviderCleanup(t, cityPath)
 	sp := runtime.NewFake()
 	_ = newCityRuntime(CityRuntimeParams{
 		CityPath: cityPath,
@@ -1054,7 +1065,7 @@ func TestCityRuntimeRunDispatchesOrdersBeforeStartupReconcile(t *testing.T) {
 	})
 	cr.od = od
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 
@@ -1109,7 +1120,7 @@ func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
 	})
 	cr.od = od
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 
@@ -2882,7 +2893,7 @@ func TestCityRuntimeReloadProviderSwapPreservesDrainTracker(t *testing.T) {
 		Stderr: io.Discard,
 	})
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 
@@ -2931,7 +2942,7 @@ func TestCityRuntimeReloadProviderSwapFailsOnPartialSessionListing(t *testing.T)
 		Stderr: &stderr,
 	})
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 	cr.sessionDrains = newDrainTracker()
@@ -2981,7 +2992,7 @@ func TestCityRuntimeReloadProviderSwapFailsOnSessionListingError(t *testing.T) {
 		Stderr: &stderr,
 	})
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 	cr.sessionDrains = newDrainTracker()
@@ -3028,7 +3039,7 @@ func TestCityRuntimeReloadAllowsRegistryAliasDifferentFromWorkspaceName(t *testi
 		Stderr: &stderr,
 	})
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "machine-alias", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "machine-alias", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 	cr.sessionDrains = newDrainTracker()
@@ -3073,7 +3084,7 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 		Stderr: &stderr,
 	})
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 	cr.sessionDrains = newDrainTracker()
@@ -3158,7 +3169,7 @@ func TestCityRuntimeReloadRetriesTransientLifecycleFailure(t *testing.T) {
 		Stderr: &stderr,
 	})
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 	cr.sessionDrains = newDrainTracker()
@@ -3649,7 +3660,7 @@ name = "fresh-agent"
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 
@@ -4145,7 +4156,7 @@ func TestCityRuntimeRunStopsBeforeStartedWhenCanceledDuringStartup(t *testing.T)
 	})
 	cr.od = od
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 
@@ -4267,7 +4278,7 @@ func TestCityRuntimeRun_PanicInStartupDoesNotShutdownCity(t *testing.T) {
 		Stderr: &stderr,
 	})
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 
@@ -4339,7 +4350,7 @@ func TestCityRuntimeRun_RetriesStartupAfterRecoveredPanicBeforeStarted(t *testin
 		Stderr: &stderr,
 	})
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 
@@ -4431,7 +4442,7 @@ func TestCityRuntimeRun_ConvergenceStartupErrorDoesNotBlockStarted(t *testing.T)
 		Stderr: &stderr,
 	})
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = store
 	cr.setControllerState(cs)
 
@@ -4488,7 +4499,7 @@ func TestCityRuntimeRun_RetriesConvergenceStartupUntilIndexPopulated(t *testing.
 		Stderr:           &stderr,
 	})
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = store
 	cr.setControllerState(cs)
 
@@ -4559,7 +4570,7 @@ func TestCityRuntimeRunShutsDownSessionsOnContextCancel(t *testing.T) {
 		Stderr: io.Discard,
 	})
 
-	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = beads.NewMemStore()
 	cr.setControllerState(cs)
 

@@ -14,8 +14,10 @@ import (
 // - session-context execution / gc hook
 
 func TestPhase0Hook_UsesGCTemplateForConfigLookupInSessionContext(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	cityDir := t.TempDir()
 	workDir := t.TempDir()
+	registerBeadsProviderCleanup(t, cityDir)
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -77,8 +79,10 @@ work_query = "printf 'pwd=%s|agent=%s|template=%s|session=%s|origin=%s' \"$PWD\"
 }
 
 func TestPhase0Hook_AliaslessOrdinarySessionUsesGCTemplateForConfigLookup(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	cityDir := t.TempDir()
 	workDir := t.TempDir()
+	registerBeadsProviderCleanup(t, cityDir)
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -134,9 +138,11 @@ work_query = "printf 'agent=%s|template=%s|session=%s|origin=%s' \"$GC_AGENT\" \
 }
 
 func TestPhase0Hook_NamedSessionContextPreservesExactOwnerEnv(t *testing.T) {
+	clearInheritedBeadsEnv(t)
 	cityDir := t.TempDir()
 	workDir := t.TempDir()
 	fakeBin := t.TempDir()
+	registerBeadsProviderCleanup(t, cityDir)
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)

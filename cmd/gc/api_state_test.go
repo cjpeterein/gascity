@@ -34,7 +34,7 @@ func TestControllerStateReadAccess(t *testing.T) {
 		},
 	}
 
-	cs := newControllerState(context.Background(), cfg, sp, ep, "test-city", t.TempDir())
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, ep, "test-city", t.TempDir())
 
 	if got := cs.CityName(); got != "test-city" {
 		t.Errorf("CityName() = %q, want %q", got, "test-city")
@@ -84,7 +84,7 @@ func TestControllerStateConcurrentAccess(t *testing.T) {
 		},
 	}
 
-	cs := newControllerState(context.Background(), cfg, sp, ep, "test-city", t.TempDir())
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, ep, "test-city", t.TempDir())
 
 	// Concurrent readers should not race.
 	var wg sync.WaitGroup
@@ -116,7 +116,7 @@ func TestControllerStateUpdate(t *testing.T) {
 		},
 	}
 
-	cs := newControllerState(context.Background(), cfg1, sp, ep, "city1", t.TempDir())
+	cs := newControllerStateTest(t, context.Background(), cfg1, sp, ep, "city1", t.TempDir())
 
 	if len(cs.BeadStores()) != 2 {
 		t.Fatalf("initial stores = %d, want 2 (city + rig)", len(cs.BeadStores()))
@@ -160,7 +160,7 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationRigs(t *testing.T
 		Workspace: config.Workspace{Name: "city1"},
 	}
 
-	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs := newControllerStateTest(t, context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.markConfigMutationPending("current-rev")
 
 	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
@@ -201,7 +201,7 @@ func TestControllerStateRuntimeUpdateDoesNotDropPendingMutationAgents(t *testing
 		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
 	}
 
-	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs := newControllerStateTest(t, context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.markConfigMutationPending("current-rev")
 
 	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
@@ -245,7 +245,7 @@ func TestControllerStateCreatedAgentVisibleAfterStaleRuntimeInterleaving(t *test
 		t.Fatalf("write city.toml: %v", err)
 	}
 
-	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs := newControllerStateTest(t, context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	if err := cs.CreateAgent(config.Agent{Name: "helper", Dir: "alpha", Provider: "bash"}); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestControllerStateRuntimeUpdateIgnoresEmptyRevisionDuringPendingMutation(t
 		Agents:    []config.Agent{{Name: "worker", Dir: "alpha", Provider: "bash"}},
 	}
 
-	cs := newControllerState(context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs := newControllerStateTest(t, context.Background(), current, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.markConfigMutationPending("current-rev")
 
 	cs.updateFromRuntime(stale, runtime.NewFake(), "")
@@ -357,7 +357,7 @@ func TestControllerStateRuntimeUpdateAcceptsBuiltinAwareRevision(t *testing.T) {
 		t.Fatalf("initial tryReloadConfig: %v", err)
 	}
 	applyRuntimeCityIdentity(initial.Cfg, "test")
-	cs := newControllerState(context.Background(), initial.Cfg, runtime.NewFake(), events.NewFake(), "test", cityDir)
+	cs := newControllerStateTest(t, context.Background(), initial.Cfg, runtime.NewFake(), events.NewFake(), "test", cityDir)
 
 	rigDir := t.TempDir()
 	updatedToml := fmt.Sprintf("[workspace]\nname = \"test\"\n\n[[rigs]]\nname = \"alpha\"\npath = %q\n", rigDir)
@@ -395,7 +395,7 @@ func TestControllerStateMutationRefreshKeepsBuiltinOrdersAndClearsPending(t *tes
 		t.Fatalf("tryReloadConfig: %v", err)
 	}
 	applyRuntimeCityIdentity(initial.Cfg, "test")
-	cs := newControllerState(context.Background(), initial.Cfg, runtime.NewFake(), events.NewFake(), "test", cityDir)
+	cs := newControllerStateTest(t, context.Background(), initial.Cfg, runtime.NewFake(), events.NewFake(), "test", cityDir)
 
 	if err := cs.EnableOrder("gate-sweep", ""); err != nil {
 		t.Fatalf("EnableOrder: %v", err)
@@ -567,7 +567,7 @@ provider = "bash"
 		}},
 	}
 	originalProvider := runtime.NewFake()
-	cs := newControllerState(context.Background(), current, originalProvider, events.NewFake(), "city1", cityDir)
+	cs := newControllerStateTest(t, context.Background(), current, originalProvider, events.NewFake(), "city1", cityDir)
 
 	cs.updateFromRuntime(stale, runtime.NewFake(), "stale-rev")
 
@@ -592,7 +592,7 @@ func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 	}
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs := newControllerStateTest(t, context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.pokeCh = make(chan struct{}, 1)
 	cs.configDirty = &atomic.Bool{}
 
@@ -624,7 +624,7 @@ func TestControllerStateCreateRigDetectsDefaultBranch(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 	}
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs := newControllerStateTest(t, context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	rigDir := newRepoWithOriginHead(t, "master")
 	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: rigDir}); err != nil {
@@ -667,7 +667,7 @@ func TestControllerStateCreateRigDetectsDefaultBranchForRelativePath(t *testing.
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 	}
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs := newControllerStateTest(t, context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: "rig"}); err != nil {
 		t.Fatalf("CreateRig: %v", err)
@@ -706,7 +706,7 @@ func TestControllerStateCreateRigInitializesStoreBeforePublishing(t *testing.T) 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 	}
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs := newControllerStateTest(t, context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 
 	rigDir := filepath.Join(cityDir, "alpha")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -746,7 +746,7 @@ func TestControllerStateMutationRollsBackWhenRefreshFails(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 	}
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs := newControllerStateTest(t, context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.pokeCh = make(chan struct{}, 1)
 	cs.configDirty = &atomic.Bool{}
 
@@ -803,7 +803,7 @@ func TestControllerStateMutationRollsBackAgentOverrideWhenRefreshFails(t *testin
 		t.Fatalf("write city.toml: %v", err)
 	}
 
-	cs := newControllerState(context.Background(), &config.City{
+	cs := newControllerStateTest(t, context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "city1"},
 	}, runtime.NewFake(), events.NewFake(), "city1", cityDir)
 	cs.pokeCh = make(chan struct{}, 1)
@@ -1020,7 +1020,7 @@ func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newControllerStateTest(t, context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -1151,7 +1151,7 @@ func TestControllerStateBuildStoresFileStoresUseLockFiles(t *testing.T) {
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newControllerStateTest(t, context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -1199,7 +1199,7 @@ func TestControllerStateFileRigStoreReloadsAcrossConcurrentHandles(t *testing.T)
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
 
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newControllerStateTest(t, context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
 		t.Fatal("BeadStore(rig1) = nil")
@@ -1262,7 +1262,7 @@ func TestControllerStateLegacyFileProviderUsesSharedCityStoreWithoutCreatingRigS
 		Workspace: config.Workspace{Name: "test-city"},
 		Rigs:      []config.Rig{{Name: "rig1", Path: rigDir}},
 	}
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newControllerStateTest(t, context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 
 	rigStore := cs.BeadStore("rig1")
 	if rigStore == nil {
@@ -1299,7 +1299,7 @@ func TestControllerStateLegacyFileProviderSharesRigStoreHandle(t *testing.T) {
 			{Name: "rig2", Path: rigTwo},
 		},
 	}
-	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	cs := newControllerStateTest(t, context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 
 	rigStoreOne := cs.BeadStore("rig1")
 	rigStoreTwo := cs.BeadStore("rig2")
@@ -1465,7 +1465,7 @@ func TestControllerStateNilEventProvider(t *testing.T) {
 		Workspace: config.Workspace{Name: "test-city"},
 	}
 
-	cs := newControllerState(context.Background(), cfg, sp, nil, "test-city", t.TempDir())
+	cs := newControllerStateTest(t, context.Background(), cfg, sp, nil, "test-city", t.TempDir())
 
 	if cs.EventProvider() != nil {
 		t.Error("EventProvider() should be nil when events disabled")
@@ -1489,7 +1489,7 @@ interval = "24h"
 		t.Fatal(err)
 	}
 
-	cs := newControllerState(context.Background(), &config.City{
+	cs := newControllerStateTest(t, context.Background(), &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 	}, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
 

@@ -1218,6 +1218,238 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 	}
 }
 
+func TestMigrateSynthesizesNamedSessionForRigScopedAgent(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "wolf"
+dir = "myproject"
+scope = "rig"
+prompt_template = "prompts/wolf.md"
+`)
+	writeFile(t, cityDir, "prompts/wolf.md", "howl\n")
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes after migration: %v", err)
+	}
+	var found *config.NamedSession
+	for i := range cfg.NamedSessions {
+		ns := &cfg.NamedSessions[i]
+		if ns.Template == "wolf" && ns.Dir == "myproject" {
+			found = ns
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("migration did not synthesize named_session for rig-scoped agent; NamedSessions=%+v", cfg.NamedSessions)
+	}
+	if found.Mode != "always" {
+		t.Fatalf("synthesized named_session mode = %q, want %q", found.Mode, "always")
+	}
+}
+
+func TestMigrateSynthesizesNamedSessionForDirOnlyAgent(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "scout"
+dir = "myproject"
+prompt_template = "prompts/scout.md"
+`)
+	writeFile(t, cityDir, "prompts/scout.md", "scout\n")
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes after migration: %v", err)
+	}
+	var found *config.NamedSession
+	for i := range cfg.NamedSessions {
+		ns := &cfg.NamedSessions[i]
+		if ns.Template == "scout" && ns.Dir == "myproject" {
+			found = ns
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("migration did not synthesize named_session for dir-only agent; NamedSessions=%+v", cfg.NamedSessions)
+	}
+	if found.Mode != "always" {
+		t.Fatalf("synthesized named_session mode = %q, want %q", found.Mode, "always")
+	}
+}
+
+func TestMigrateSkipsNamedSessionForCityScopedAgent(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "overseer"
+scope = "city"
+prompt_template = "prompts/overseer.md"
+`)
+	writeFile(t, cityDir, "prompts/overseer.md", "oversee\n")
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes after migration: %v", err)
+	}
+	for _, ns := range cfg.NamedSessions {
+		if ns.Template == "overseer" {
+			t.Fatalf("migration should not synthesize named_session for scope='city' agent; got %+v", ns)
+		}
+	}
+}
+
+func TestMigrateSkipsNamedSessionForUnscopedNoDirAgent(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "drifter"
+prompt_template = "prompts/drifter.md"
+`)
+	writeFile(t, cityDir, "prompts/drifter.md", "drift\n")
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes after migration: %v", err)
+	}
+	for _, ns := range cfg.NamedSessions {
+		if ns.Template == "drifter" {
+			t.Fatalf("migration should not synthesize named_session for unscoped no-dir agent; got %+v", ns)
+		}
+	}
+}
+
+func TestMigrateIsIdempotentOnNamedSessionSynthesis(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "wolf"
+dir = "myproject"
+scope = "rig"
+prompt_template = "prompts/wolf.md"
+`)
+	writeFile(t, cityDir, "prompts/wolf.md", "howl\n")
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("first Apply: %v", err)
+	}
+
+	beforeCity := readFile(t, filepath.Join(cityDir, "city.toml"))
+
+	report, err := Apply(cityDir, Options{})
+	if err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	if len(report.Changes) != 0 {
+		t.Fatalf("expected no changes on second run, got %v", report.Changes)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "city.toml")); got != beforeCity {
+		t.Fatalf("city.toml changed on second run:\n%s", got)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes after migration: %v", err)
+	}
+	count := 0
+	for _, ns := range cfg.NamedSessions {
+		if ns.Template == "wolf" && ns.Dir == "myproject" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one named_session for wolf, got %d; NamedSessions=%+v", count, cfg.NamedSessions)
+	}
+}
+
+func TestMigratePreservesPreexistingNamedSession(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[named_session]]
+template = "wolf"
+dir = "myproject"
+mode = "on_demand"
+
+[[agent]]
+name = "wolf"
+dir = "myproject"
+scope = "rig"
+prompt_template = "prompts/wolf.md"
+`)
+	writeFile(t, cityDir, "prompts/wolf.md", "howl\n")
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes after migration: %v", err)
+	}
+	count := 0
+	var match *config.NamedSession
+	for i := range cfg.NamedSessions {
+		ns := &cfg.NamedSessions[i]
+		if ns.Template == "wolf" && ns.Dir == "myproject" {
+			count++
+			match = ns
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one named_session for wolf, got %d; NamedSessions=%+v", count, cfg.NamedSessions)
+	}
+	if match.Mode != "on_demand" {
+		t.Fatalf("pre-existing named_session mode overwritten: mode = %q, want %q", match.Mode, "on_demand")
+	}
+}
+
 func intPtr(v int) *int {
 	return &v
 }

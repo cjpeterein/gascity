@@ -138,28 +138,53 @@ needs = ["check-inbox"]
 description = """
 **Config: event_timeout = {{event_timeout}}**
 
-Search for work beads assigned to you with branch metadata:
+Run the wait-for-work loop below. It is structured so the event watch
+cannot race against a polecat's bead handoff: the sequence cursor is
+captured **before** each query, so any bead write that happens after
+the query is guaranteed to produce an event with `seq > SEQ` and wake
+the watch.
+
+The loop also queries by `gc.routed_to` metadata as a safety net. The
+polecat writes both `assignee` and `metadata.gc.routed_to` to the same
+refinery identity, so matching on either field survives drift between
+the `$GC_AGENT` string and the value stored on the bead.
+
 ```bash
-WORK=$(gc bd list --assignee=$GC_AGENT --status=open \
-  --exclude-type=epic --limit=1 --json | jq -r '.[0].id // empty')
+find_work() {
+  # 1) Direct assignee match.
+  WORK=$(gc bd list --assignee="$GC_AGENT" --status=open \
+    --exclude-type=epic --limit=1 --json | jq -r '.[0].id // empty')
+  if [ -n "$WORK" ]; then printf '%s' "$WORK"; return 0; fi
+  # 2) Metadata fallback — robust to assignee-shape drift.
+  gc bd list --metadata-field "gc.routed_to=$GC_AGENT" \
+    --status=open --exclude-type=epic --limit=1 --json \
+    | jq -r '.[0].id // empty'
+}
+
+TIMEOUT={{event_timeout}}
+while :; do
+  # Capture SEQ BEFORE querying. Any bead write that lands after this
+  # query will have seq > SEQ and wake the watch below.
+  SEQ=$(gc events --seq)
+  WORK=$(find_work)
+  if [ -n "$WORK" ]; then break; fi
+  gc events --watch --type=bead.updated \
+    --after="$SEQ" --timeout "${TIMEOUT}s" || true
+  TIMEOUT=$((TIMEOUT * 2))
+  [ "$TIMEOUT" -gt 300 ] && TIMEOUT=300
+done
 ```
 
-If found: read the bead metadata to confirm it has a branch:
+`--timeout` makes the watch self-terminating — it exits on its own
+when an event arrives or the timeout fires. Do not add `&`, pipe
+elsewhere, or wrap in a background process.
+
+Once `$WORK` is set, read the bead metadata to confirm it has a branch:
 ```bash
-gc bd show $WORK --json | jq '.[0].metadata'
+gc bd show "$WORK" --json | jq '.[0].metadata'
 ```
 The bead MUST have `metadata.branch`. If `metadata.target` is missing,
 use {{target_branch}} as default. Note the work bead ID and close this step.
-
-If NO work found: wait for assignment:
-```bash
-SEQ=$(gc events --seq)
-gc events --watch --type=bead.updated \
-  --after=$SEQ --timeout {{event_timeout}}s
-```
-
-On event: re-check for assigned work. If found, close this step.
-On timeout: re-check anyway, then wait again with doubled timeout (cap 300s).
 
 **Do not close this step until you have a work bead with branch metadata.**"""
 

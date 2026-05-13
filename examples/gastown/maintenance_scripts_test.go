@@ -3205,6 +3205,11 @@ func jsonlExportEnv(t *testing.T, cityDir, binDir, stateDir, archiveRepo, gcLog,
 		"GC_JSONL_ARCHIVE_REPO":      archiveRepo,
 		"GC_JSONL_MAX_PUSH_FAILURES": "99",
 		"GC_JSONL_SCRUB":             "false",
+		// Pin the threshold at the historical 20% so existing spike-detection
+		// tests keep exercising escalation at prev=100/current=10 (90% delta).
+		// The production default is higher (see jsonl-export.sh); tests that
+		// exercise the production default override this explicitly.
+		"GC_JSONL_SPIKE_THRESHOLD": "20",
 		"GIT_CONFIG_GLOBAL":          filepath.Join(t.TempDir(), "gitconfig"),
 		"GIT_CONFIG_NOSYSTEM":        "1",
 		"PATH":                       binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
@@ -3652,6 +3657,84 @@ func TestJsonlExportCommitsOnHaltToAdvanceBaseline(t *testing.T) {
 	}
 	if strings.Contains(string(gcData), "DOG_DONE: jsonl — exported") {
 		t.Fatalf("HALT path must not emit the success summary nudge; gc log:\n%s", gcData)
+	}
+}
+
+func TestJsonlExportDefaultThresholdToleratesActiveWorkload(t *testing.T) {
+	// gc-4nd: the prior 20% default treated any meaningful multi-agent burst
+	// as a HIGH spike (bootstraps logged deltas of +32/+48/+83%). The new
+	// default must not escalate on a single ~80% growth swing — that shape
+	// matches bootstrap activity, not a runaway or pollution event.
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	initSeedArchive(t, archiveRepo, 100)
+	// 100 → 180 == +80% delta: well above the old default (20%) but below the
+	// new default (100%).
+	writeMultiRecordDoltStub(t, binDir, 180)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	// Drop the helper's test-only pin so this run exercises the script default.
+	delete(env, "GC_JSONL_SPIKE_THRESHOLD")
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	mailData, err := os.ReadFile(mailLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(mail log): %v", err)
+	}
+	if strings.Contains(string(mailData), "ESCALATION: JSONL spike") {
+		t.Fatalf("default threshold must tolerate an 80%% growth burst; mail log:\n%s", mailData)
+	}
+
+	// Sanity: the success summary nudge fired (script reached the end).
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "DOG_DONE: jsonl") {
+		t.Fatalf("expected DOG_DONE nudge in gc log:\n%s", gcData)
+	}
+}
+
+func TestJsonlExportDefaultThresholdStillCatchesTrueSpike(t *testing.T) {
+	// Regression guard: raising the default must not silence genuine spikes.
+	// A doubling+ swing (prev=100, current=300 = +200%) is far beyond any
+	// organic growth rate and must still HALT + escalate under the default.
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+
+	initSeedArchive(t, archiveRepo, 100)
+	writeMultiRecordDoltStub(t, binDir, 300)
+	writeJsonlExportGCStub(t, binDir)
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+	delete(env, "GC_JSONL_SPIKE_THRESHOLD")
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	mailData, err := os.ReadFile(mailLog)
+	if err != nil {
+		t.Fatalf("ReadFile(mail log): %v", err)
+	}
+	if !strings.Contains(string(mailData), "ESCALATION: JSONL spike") {
+		t.Fatalf("default threshold must still catch a 200%% swing; mail log:\n%s", mailData)
+	}
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "HALTED on spike detection") {
+		t.Fatalf("expected HALT nudge on true spike under default threshold; gc log:\n%s", gcData)
 	}
 }
 

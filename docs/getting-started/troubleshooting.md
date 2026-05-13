@@ -309,6 +309,31 @@ restart the city with `gc restart`. That bumps the escalation threshold
 from 3 to 99, which at the current 15-minute tick rate is ~24 hours of
 silence.
 
+### Reading a `JSONL spike detected [HIGH]` escalation
+
+On every run `jsonl-export` compares the current per-database record count
+against the count in the archive's previous commit. When the absolute
+percent delta exceeds `GC_JSONL_SPIKE_THRESHOLD` (default `100`, meaning
+the record count at least doubled or more than halved), the run HALTs
+after committing a local-only baseline-advance snapshot and escalates to
+the mayor.
+
+Tuning:
+
+- Operators running lightly-loaded cities who want earlier warning on
+  smaller swings can tighten the threshold, e.g.
+  `GC_JSONL_SPIKE_THRESHOLD=50`.
+- Operators seeing repeated false positives during genuinely active
+  multi-agent bursts can loosen it further, e.g. `200` (a tripling).
+- Percent deltas on very small databases are noise; the absolute floor
+  `GC_JSONL_MIN_PREV_FOR_SPIKE` (default `10`) skips the check when the
+  previous record count is below that value. Set to `0` to disable.
+
+The threshold defaults to `100` because real-world multi-agent workloads
+routinely produce 20-80% swings between 15-minute export cycles; a
+tighter default trains operators to archive spike alerts without reading
+them, which silences the alarm for actual incidents.
+
 ## WSL (Windows Subsystem for Linux)
 
 Gas City works under WSL 2 with a standard Ubuntu or Debian distribution.

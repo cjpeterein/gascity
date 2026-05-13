@@ -95,6 +95,17 @@ func setCwd(t *testing.T, dir string) {
 	}
 }
 
+// isolateBdCwd chdirs to a hermetic tempdir so CWD-sensitive bd scope
+// resolution (resolveBdScopeTarget, doBd) cannot pick up ambient
+// .beads/redirect files from the outer checkout — e.g. a refinery or
+// polecat worktree whose redirect points at the real shared rig store.
+// Tests that exercise CWD fallback without staging their own CWD via
+// setCwd should call this first. See gc-2x5.
+func isolateBdCwd(t *testing.T) {
+	t.Helper()
+	setCwd(t, t.TempDir())
+}
+
 // registryAt creates a Registry backed by a file in the given temp dir.
 func registryAt(t *testing.T, gcHome string) *supervisor.Registry {
 	t.Helper()

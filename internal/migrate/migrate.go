@@ -150,6 +150,8 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 		}
 	}
 
+	synthesizeNamedSessions(cityCfg, packCfg, selectedAgents)
+
 	packChanged := false
 	if len(packCfg.Agents) > 0 {
 		packCfg.Agents = nil
@@ -634,6 +636,56 @@ func migrateAgentAssets(cityPath string, entry agentEntry, usage usageCounts, re
 	}
 
 	return nil
+}
+
+// synthesizeNamedSessions emits a [[named_session]] entry in city.toml for
+// each migrated rig-scoped agent that doesn't already have a matching backing
+// session declared in either city.toml or pack.toml. An agent qualifies when
+// scope="rig" or when scope is unset and dir is set. Mode defaults to "always"
+// so the reconciler keeps the canonical session managed. The emission is
+// idempotent: a matching (template, dir) pair is never duplicated.
+func synthesizeNamedSessions(cityCfg *config.City, packCfg packFile, agents []agentEntry) {
+	if cityCfg == nil {
+		return
+	}
+	existing := make(map[[2]string]bool, len(cityCfg.NamedSessions)+len(packCfg.NamedSessions))
+	for _, ns := range cityCfg.NamedSessions {
+		existing[[2]string{ns.Template, ns.Dir}] = true
+	}
+	for _, ns := range packCfg.NamedSessions {
+		existing[[2]string{ns.Template, ns.Dir}] = true
+	}
+	for _, entry := range agents {
+		agent := entry.Agent
+		if !needsSynthesizedNamedSession(agent) {
+			continue
+		}
+		key := [2]string{agent.Name, agent.Dir}
+		if existing[key] {
+			continue
+		}
+		cityCfg.NamedSessions = append(cityCfg.NamedSessions, config.NamedSession{
+			Template: agent.Name,
+			Dir:      agent.Dir,
+			Mode:     "always",
+		})
+		existing[key] = true
+	}
+}
+
+// needsSynthesizedNamedSession reports whether a migrated agent qualifies for
+// [[named_session]] synthesis. Rig-scoped agents and agents with a dir but no
+// explicit scope land on the default "rig" path and need a canonical session
+// alias; city-scoped and unscoped-no-dir agents do not.
+func needsSynthesizedNamedSession(agent config.Agent) bool {
+	switch agent.Scope {
+	case "rig":
+		return true
+	case "":
+		return agent.Dir != ""
+	default:
+		return false
+	}
 }
 
 func ensurePackMeta(packCfg *packFile, cityCfg *config.City, cityPath string) bool {

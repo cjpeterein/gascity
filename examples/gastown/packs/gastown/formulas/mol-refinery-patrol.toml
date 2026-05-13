@@ -169,10 +169,30 @@ needs = ["check-inbox"]
 description = """
 **Config: event_timeout = {{event_timeout}}**
 
-Search for work beads assigned to you with branch metadata:
+Run the wait-for-work loop below. It queries by `gc.routed_to`
+metadata as a safety net so the find-work query survives drift
+between the `$GC_AGENT` string and the assignee value the polecat
+writes — the polecat writes both `assignee` and
+`metadata.gc.routed_to`, so matching on either field cannot strand
+a bead.
+
 ```bash
-WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee=$GC_AGENT --status=open \
-  --exclude-type=epic --has-metadata-key=branch --limit=1 --json | jq -r '.[0].id // empty')
+find_work() {
+  # 1) Direct assignee match (rig-scoped when $GC_RIG is set).
+  WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open \
+    --exclude-type=epic --has-metadata-key=branch --limit=1 --json | jq -r '.[0].id // empty')
+  if [ -n "$WORK" ]; then printf '%s' "$WORK"; return 0; fi
+  # 2) Metadata fallback — robust to assignee-shape drift.
+  gc bd list ${GC_RIG:+--rig="$GC_RIG"} --metadata-field "gc.routed_to=$GC_AGENT" \
+    --status=open --exclude-type=epic --limit=1 --json \
+    | jq -r '.[0].id // empty'
+}
+
+while :; do
+  WORK=$(find_work)
+  if [ -n "$WORK" ]; then break; fi
+  sleep {{event_timeout}}
+done
 ```
 
 `${GC_RIG:+--rig="$GC_RIG"}` scopes the query to this refinery's rig
@@ -181,19 +201,12 @@ sees rig-scoped work beads — the `assignee` field alone does not route
 by namespace. For HQ-only refineries `$GC_RIG` is empty and the flag
 expands to nothing.
 
-If found: read the bead metadata to confirm it has a branch:
+Once `$WORK` is set, read the bead metadata to confirm it has a branch:
 ```bash
-gc bd show $WORK --json | jq '.[0].metadata'
+gc bd show "$WORK" --json | jq '.[0].metadata'
 ```
 The bead MUST have `metadata.branch`. If `metadata.target` is missing,
 use {{target_branch}} as default. Note the work bead ID and close this step.
-
-If NO work found: sleep before re-checking:
-```bash
-sleep {{event_timeout}}
-```
-
-Re-check for assigned work. If found, close this step. Otherwise repeat the sleep.
 
 Note: previous implementation watched `gc events --type=bead.updated` for fast wake-up, but cache-reconcile fires that event constantly, turning the watch into a tight loop with no useful backoff. Fixed sleep gives predictable idle cost (~$0 vs ~$3.46/15min hot-loop measured 2026-04-29).
 

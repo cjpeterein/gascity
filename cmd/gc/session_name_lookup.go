@@ -218,8 +218,12 @@ func createPoolSessionBeadWithAlias(
 	if err != nil {
 		return beads.Bead{}, err
 	}
-	sessionName, err = derivePoolSessionName(store, cfg, template, bead.ID, resolvedTmuxAlias, sessionBeads)
+	sessionName, err = derivePoolSessionName(store, cfg, template, agentName, bead.ID, resolvedTmuxAlias, sessionBeads)
 	if err != nil {
+		_ = store.Close(bead.ID)
+		return beads.Bead{}, err
+	}
+	if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
 		_ = store.Close(bead.ID)
 		return beads.Bead{}, err
 	}
@@ -241,14 +245,18 @@ func createPoolSessionBeadWithAlias(
 
 // derivePoolSessionName picks the session_name for a fresh pool bead. When
 // resolvedTmuxAlias is non-empty and unreserved in the live store, config, and
-// current open snapshot, it wins; otherwise the bead ID is appended as a
-// deterministic suffix.
-func derivePoolSessionName(store beads.Store, cfg *config.City, template, beadID, resolvedTmuxAlias string, snapshot *sessionBeadSnapshot) (string, error) {
+// current open snapshot, it wins; otherwise the qualified instance name (when
+// known) prefixes the bead ID via PoolSessionNameForInstance, falling back to
+// the legacy PoolSessionName form when no qualified instance is available.
+func derivePoolSessionName(store beads.Store, cfg *config.City, template, agentName, beadID, resolvedTmuxAlias string, snapshot *sessionBeadSnapshot) (string, error) {
 	resolvedTmuxAlias, err := validateResolvedPoolTmuxAlias(template, resolvedTmuxAlias)
 	if err != nil {
 		return "", err
 	}
 	if resolvedTmuxAlias == "" {
+		if instanceName := PoolSessionNameForInstance(agentName, beadID); instanceName != "" {
+			return instanceName, nil
+		}
 		return PoolSessionName(template, beadID), nil
 	}
 	sessionName := resolvedTmuxAlias

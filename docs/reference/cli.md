@@ -42,6 +42,7 @@ gc [flags]
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
+| [gc maintenance](#gc-maintenance) | City maintenance operations (hooks, etc.) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
@@ -1608,6 +1609,37 @@ Show all messages sharing a thread ID or message ID, ordered by time.
 
 ```
 gc mail thread <id>
+```
+
+## gc maintenance
+
+Maintenance commands for keeping a city's rigs in sync with
+city-managed infrastructure.
+
+```
+gc maintenance
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc maintenance install-hooks](#gc-maintenance-install-hooks) | Install or refresh the city's git hook infrastructure |
+
+## gc maintenance install-hooks
+
+Install or refresh the city's shared prepare-commit-msg hook and
+the per-rig stub block that delegates to it.
+
+Writes the city hook to &lt;city&gt;/.gc/hooks/prepare-commit-msg and updates
+the marker-delimited GASCITY FOOTER block in each rig's active hooks
+directory (core.hooksPath if set, else .githooks/). Idempotent — safe to
+re-run.
+
+The hook verifies that agent-authored commits include a Claude
+co-authorship footer. Behavior is controlled at runtime by
+GC_HOOK_FOOTER_MODE (warn|strict|off, default warn).
+
+```
+gc maintenance install-hooks
 ```
 
 ## gc mcp

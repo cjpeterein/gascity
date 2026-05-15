@@ -85,6 +85,16 @@ so long-running workers can signal liveness to the dashboard, and
 "release-if-current <issue-id> <assignee>", which conditionally resets an
 in-progress assignment only when the bead still has that assignee.
 
+Pass --cross-rig (only with list, ready, or blocked) to fan the bd command
+out across the city store and every bound rig and merge the output. Human
+output groups results under per-rig "=== <name> (<prefix>) ===" headers;
+--json yields a single flat array.
+
+When run from the city scope without --rig or --cross-rig and stdout is
+a terminal, gc bd list/ready/blocked emits a one-line stderr hint
+pointing at --cross-rig. Set GC_NO_CROSS_RIG_HINT=1 to suppress the hint
+in scripts.
+
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.`,
@@ -93,7 +103,9 @@ auto-export behavior, invoke bd directly.`,
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
   gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
-  gc bd release-if-current my-project-abc worker-1`,
+  gc bd release-if-current my-project-abc worker-1
+  gc bd --cross-rig list             # merge issues across all rigs
+  gc bd --cross-rig ready --json     # merged JSON for tooling`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
 			// Plumb doBd's numeric exit code through exitForCode so the
@@ -186,7 +198,7 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {
-	cityName, rigName, bdArgs := extractBdScopeFlags(args)
+	cityName, rigName, crossRig, bdArgs := extractBdScopeFlags(args)
 
 	bdArgs, err := rewriteBdHeartbeatArgs(bdArgs)
 	if err != nil {
@@ -209,6 +221,20 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+
+	if crossRig {
+		subcmd := bdSubcommand(bdArgs)
+		if !crossRigSupportsSubcommand(subcmd) {
+			fmt.Fprintf(stderr, "gc bd: --cross-rig is not supported for %q yet (supported: %s)\n", subcmd, crossRigSubcommandList()) //nolint:errcheck // best-effort stderr
+			return 2
+		}
+		if rigName != "" {
+			fmt.Fprintln(stderr, "gc bd: --rig and --cross-rig are mutually exclusive") //nolint:errcheck // best-effort stderr
+			return 2
+		}
+		scopes := crossRigScopes(cityPath, cfg)
+		return runCrossRigBd(cityPath, cfg, scopes, bdArgs, stdout, stderr)
 	}
 
 	target, err := resolveBdScopeTarget(cfg, cityPath, rigName, bdArgs)
@@ -296,6 +322,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return bdSilentFallbackExitCode
 	}
 
+	maybeEmitCrossRigHint(stderr, target, rigName, bdArgs)
 	return 0
 }
 
@@ -349,12 +376,14 @@ func resolveBdCity(cityName string) (string, error) {
 	return resolveCity()
 }
 
-// extractBdScopeFlags extracts gc-owned --city/--rig flags from the raw
-// argument list and returns the requested city, rig, and remaining bd args.
-// It also falls back to cobra's persistent globals for "gc --city X --rig Y bd".
-func extractBdScopeFlags(args []string) (string, string, []string) {
+// extractBdScopeFlags extracts gc-owned --city/--rig/--cross-rig flags from
+// the raw argument list and returns the requested city, rig, cross-rig flag,
+// and remaining bd args. It also falls back to cobra's persistent globals
+// for "gc --city X --rig Y bd".
+func extractBdScopeFlags(args []string) (string, string, bool, []string) {
 	var cityName string
 	var rigName string
+	var crossRig bool
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		switch {
@@ -372,6 +401,9 @@ func extractBdScopeFlags(args []string) (string, string, []string) {
 		case strings.HasPrefix(args[i], "--rig="):
 			rigName = strings.TrimPrefix(args[i], "--rig=")
 			continue
+		case args[i] == "--cross-rig":
+			crossRig = true
+			continue
 		}
 		rest = append(rest, args[i])
 	}
@@ -381,14 +413,14 @@ func extractBdScopeFlags(args []string) (string, string, []string) {
 	if rigName == "" && rigFlag != "" {
 		rigName = rigFlag
 	}
-	return cityName, rigName, rest
+	return cityName, rigName, crossRig, rest
 }
 
 // extractRigFlag extracts --rig <name> from the argument list and returns
 // the rig name and remaining args. Also checks the global rigFlag set by
 // cobra's persistent flag parsing (for "gc --rig foo bd list" syntax).
 func extractRigFlag(args []string) (string, []string) {
-	_, rigName, rest := extractBdScopeFlags(args)
+	_, rigName, _, rest := extractBdScopeFlags(args)
 	return rigName, rest
 }
 

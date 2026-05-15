@@ -109,12 +109,15 @@ func TestExtractBdScopeFlags(t *testing.T) {
 
 	cityFlag = ""
 	rigFlag = ""
-	gotCity, gotRig, gotArgs := extractBdScopeFlags([]string{"--city=/tmp/city", "--rig", "repo", "context", "--json"})
+	gotCity, gotRig, gotCross, gotArgs := extractBdScopeFlags([]string{"--city=/tmp/city", "--rig", "repo", "context", "--json"})
 	if gotCity != "/tmp/city" {
 		t.Fatalf("city = %q, want %q", gotCity, "/tmp/city")
 	}
 	if gotRig != "repo" {
 		t.Fatalf("rig = %q, want %q", gotRig, "repo")
+	}
+	if gotCross {
+		t.Fatalf("crossRig = %v, want false", gotCross)
 	}
 	wantArgs := []string{"context", "--json"}
 	if len(gotArgs) != len(wantArgs) {
@@ -128,15 +131,37 @@ func TestExtractBdScopeFlags(t *testing.T) {
 
 	cityFlag = "/flag-city"
 	rigFlag = "flag-rig"
-	gotCity, gotRig, gotArgs = extractBdScopeFlags([]string{"list"})
+	gotCity, gotRig, gotCross, gotArgs = extractBdScopeFlags([]string{"list"})
 	if gotCity != "/flag-city" {
 		t.Fatalf("fallback city = %q, want %q", gotCity, "/flag-city")
 	}
 	if gotRig != "flag-rig" {
 		t.Fatalf("fallback rig = %q, want %q", gotRig, "flag-rig")
 	}
+	if gotCross {
+		t.Fatalf("fallback crossRig = %v, want false", gotCross)
+	}
 	if len(gotArgs) != 1 || gotArgs[0] != "list" {
 		t.Fatalf("fallback args = %v, want [list]", gotArgs)
+	}
+
+	cityFlag = ""
+	rigFlag = ""
+	gotCity, gotRig, gotCross, gotArgs = extractBdScopeFlags([]string{"--cross-rig", "list", "--json"})
+	if gotCity != "" || gotRig != "" {
+		t.Fatalf("city/rig = %q/%q, want empty", gotCity, gotRig)
+	}
+	if !gotCross {
+		t.Fatalf("crossRig = false, want true")
+	}
+	wantArgs = []string{"list", "--json"}
+	if len(gotArgs) != len(wantArgs) {
+		t.Fatalf("cross-rig args = %v, want %v", gotArgs, wantArgs)
+	}
+	for i := range wantArgs {
+		if gotArgs[i] != wantArgs[i] {
+			t.Fatalf("cross-rig args[%d] = %q, want %q", i, gotArgs[i], wantArgs[i])
+		}
 	}
 }
 

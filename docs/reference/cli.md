@@ -257,6 +257,16 @@ gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
 "update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
 so long-running workers can signal liveness to the dashboard.
 
+Pass --cross-rig (only with list, ready, or blocked) to fan the bd command
+out across the city store and every bound rig and merge the output. Human
+output groups results under per-rig "=== &lt;name&gt; (&lt;prefix&gt;) ===" headers;
+--json yields a single flat array.
+
+When run from the city scope without --rig or --cross-rig and stdout is
+a terminal, gc bd list/ready/blocked emits a one-line stderr hint
+pointing at --cross-rig. Set GC_NO_CROSS_RIG_HINT=1 to suppress the hint
+in scripts.
+
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
 auto-export behavior, invoke bd directly.
@@ -273,6 +283,8 @@ gc bd --rig my-project list
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
   gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+  gc bd --cross-rig list             # merge issues across all rigs
+  gc bd --cross-rig ready --json     # merged JSON for tooling
 ```
 
 ## gc beads

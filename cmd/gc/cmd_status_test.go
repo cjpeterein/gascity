@@ -142,6 +142,33 @@ func TestDoRigStatusSuspendedAgent(t *testing.T) {
 	}
 }
 
+func TestDoRigStatusLongAgentNamesKeepStatusSeparator(t *testing.T) {
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	rig := config.Rig{Name: "petereinc-gascity-pack", Path: "/tmp/long"}
+	agents := []config.Agent{
+		{Name: "gastown.witness", Dir: "petereinc-gascity-pack", MaxActiveSessions: intPtr(1)},
+		{Name: "gastown.polecat", Dir: "petereinc-gascity-pack", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runDoRigStatus(sp, dops, rig, agents, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	bad := []string{
+		"petereinc-gascity-pack/gastown.witnessstopped",
+		"petereinc-gascity-pack/gastown.polecat-1stopped",
+		"petereinc-gascity-pack/gastown.polecat-2stopped",
+	}
+	for _, b := range bad {
+		if strings.Contains(out, b) {
+			t.Errorf("rig status collided name and value (%q present), got:\n%s", b, out)
+		}
+	}
+}
+
 func TestDoRigStatusReportsObservationErrors(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "frontend--worker", runtime.Config{Command: "echo"}); err != nil {

@@ -399,6 +399,38 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 	}
 }
 
+// statusDefaultColumnWidth is the historical fixed width used for the
+// name column in `gc status`. Sections compute their actual width as
+// max(name+indent) + 2, but never narrower than this so short outputs
+// keep their familiar layout.
+const statusDefaultColumnWidth = 26
+
+// statusSectionColumn computes the column where the value should start
+// for a section, given its rows' (indent, name) pairs. It enforces a
+// minimum of statusDefaultColumnWidth and a 2-space gap between the
+// widest name and the value.
+func statusSectionColumn(rows [][2]int) int {
+	col := statusDefaultColumnWidth
+	for _, r := range rows {
+		want := r[0] + r[1] + 2
+		if want > col {
+			col = want
+		}
+	}
+	return col
+}
+
+// padForColumn returns enough spaces to advance from `indent + len(name)`
+// to `col`, with a minimum of 2 spaces so the name and the value never
+// collide even when the name overflows the section column.
+func padForColumn(indent, nameLen, col int) string {
+	pad := col - indent - nameLen
+	if pad < 2 {
+		pad = 2
+	}
+	return strings.Repeat(" ", pad)
+}
+
 func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.Writer) {
 	fmt.Fprintf(stdout, "%s  %s\n", snapshot.CityName, snapshot.CityPath)                //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "  Controller: %s\n", controllerStatusLine(snapshot.Controller)) //nolint:errcheck // best-effort stdout
@@ -413,32 +445,59 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 	}
 
 	if len(snapshot.Agents) > 0 {
+		var rows [][2]int
+		for _, row := range snapshot.Agents {
+			if row.ScaleLabel != "" {
+				rows = append(rows, [2]int{2, len(row.GroupName)})
+			}
+			indent := 2
+			if row.Expanded {
+				indent = 4
+			}
+			rows = append(rows, [2]int{indent, len(row.Agent.QualifiedName)})
+		}
+		col := statusSectionColumn(rows)
+
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
 		fmt.Fprintln(stdout, "Agents:")
 		for _, row := range snapshot.Agents {
 			if row.ScaleLabel != "" {
-				fmt.Fprintf(stdout, "  %-24s%s\n", row.GroupName, row.ScaleLabel) //nolint:errcheck // best-effort stdout
+				fmt.Fprintf(stdout, "  %s%s%s\n", row.GroupName, padForColumn(2, len(row.GroupName), col), row.ScaleLabel) //nolint:errcheck // best-effort stdout
 			}
 			status := agentStatusLine(row.Agent.Running, dops, row.SessionName, row.Agent.Suspended)
+			indent := "  "
+			indentLen := 2
 			if row.Expanded {
-				fmt.Fprintf(stdout, "    %-22s%s\n", row.Agent.QualifiedName, status) //nolint:errcheck // best-effort stdout
-			} else {
-				fmt.Fprintf(stdout, "  %-24s%s\n", row.Agent.QualifiedName, status) //nolint:errcheck // best-effort stdout
+				indent = "    "
+				indentLen = 4
 			}
+			fmt.Fprintf(stdout, "%s%s%s%s\n", indent, row.Agent.QualifiedName, padForColumn(indentLen, len(row.Agent.QualifiedName), col), status) //nolint:errcheck // best-effort stdout
 		}
 		fmt.Fprintln(stdout)                                                                                        //nolint:errcheck // best-effort stdout
 		fmt.Fprintf(stdout, "%d/%d agents running\n", snapshot.Summary.RunningAgents, snapshot.Summary.TotalAgents) //nolint:errcheck // best-effort stdout
 	}
 
 	if len(snapshot.NamedSessions) > 0 {
+		var rows [][2]int
+		for _, named := range snapshot.NamedSessions {
+			rows = append(rows, [2]int{2, len(named.Identity)})
+		}
+		col := statusSectionColumn(rows)
+
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
 		fmt.Fprintln(stdout, "Named sessions:")
 		for _, named := range snapshot.NamedSessions {
-			fmt.Fprintf(stdout, "  %-24s%s (%s)\n", named.Identity, named.Status, named.Mode) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "  %s%s%s (%s)\n", named.Identity, padForColumn(2, len(named.Identity), col), named.Status, named.Mode) //nolint:errcheck // best-effort stdout
 		}
 	}
 
 	if len(snapshot.Rigs) > 0 {
+		var rows [][2]int
+		for _, r := range snapshot.Rigs {
+			rows = append(rows, [2]int{2, len(r.Name)})
+		}
+		col := statusSectionColumn(rows)
+
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
 		fmt.Fprintln(stdout, "Rigs:")
 		for _, r := range snapshot.Rigs {
@@ -446,7 +505,7 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 			if r.Suspended {
 				annotation = "  (suspended)"
 			}
-			fmt.Fprintf(stdout, "  %-24s%s%s\n", r.Name, r.Path, annotation) //nolint:errcheck // best-effort stdout
+			fmt.Fprintf(stdout, "  %s%s%s%s\n", r.Name, padForColumn(2, len(r.Name), col), r.Path, annotation) //nolint:errcheck // best-effort stdout
 		}
 	}
 }

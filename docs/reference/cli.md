@@ -51,7 +51,7 @@ gc [flags]
 | [gc init](#gc-init) | Initialize a new city |
 | [gc lint](#gc-lint) | Validate a pack before merge |
 | [gc mail](#gc-mail) | Send and receive messages between agents and humans |
-| [gc maintenance](#gc-maintenance) | Dolt store maintenance (gc + snapshot) |
+| [gc maintenance](#gc-maintenance) | City maintenance (Dolt store + git hooks) |
 | [gc mcp](#gc-mcp) | Inspect projected MCP config |
 | [gc nudge](#gc-nudge) | Inspect and deliver deferred nudges |
 | [gc order](#gc-order) | Manage orders (scheduled and event-driven dispatch) |
@@ -2232,10 +2232,17 @@ gc mail thread <id> [flags]
 
 ## gc maintenance
 
-Manage periodic Dolt store maintenance (see docs/adr/0002-dolt-store-maintenance-runbook.md).
+Manage city-wide maintenance tasks.
 
-The weekly loop runs inside the supervisor process when [maintenance.dolt] enabled=true
-in city.toml. 'status' shows loop state and recent runs; 'dolt-gc' triggers a manual run.
+Subcommands:
+  status         Show Dolt store maintenance status (supervisor API).
+  dolt-gc        Trigger a Dolt store maintenance run (supervisor API).
+  install-hooks  Install or refresh the city's prepare-commit-msg hook
+                 and the per-rig stub block that delegates to it.
+
+The weekly Dolt loop runs inside the supervisor process when
+[maintenance.dolt] enabled=true in city.toml. The hook installer is
+filesystem-only and does not require the controller to be up.
 
 ```
 gc maintenance
@@ -2244,6 +2251,7 @@ gc maintenance
 | Subcommand | Description |
 |------------|-------------|
 | [gc maintenance dolt-gc](#gc-maintenance-dolt-gc) | Trigger a Dolt store maintenance run |
+| [gc maintenance install-hooks](#gc-maintenance-install-hooks) | Install or refresh the city's git hook infrastructure |
 | [gc maintenance status](#gc-maintenance-status) | Show Dolt store maintenance status |
 
 ## gc maintenance dolt-gc
@@ -2258,6 +2266,24 @@ gc maintenance dolt-gc [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit machine-readable JSON |
 | `--wait` | bool |  | block until the run completes (exit 1 on failure) |
+
+## gc maintenance install-hooks
+
+Install or refresh the city's shared prepare-commit-msg hook and
+the per-rig stub block that delegates to it.
+
+Writes the city hook to &lt;city&gt;/.gc/hooks/prepare-commit-msg and updates
+the marker-delimited GASCITY FOOTER block in each rig's active hooks
+directory (core.hooksPath if set, else .githooks/). Idempotent — safe to
+re-run.
+
+The hook verifies that agent-authored commits include a Claude
+co-authorship footer. Behavior is controlled at runtime by
+GC_HOOK_FOOTER_MODE (warn|strict|off, default warn).
+
+```
+gc maintenance install-hooks
+```
 
 ## gc maintenance status
 

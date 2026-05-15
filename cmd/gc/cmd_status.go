@@ -299,21 +299,35 @@ func doRigStatusWithStoreAndSnapshot(
 	fmt.Fprintf(stdout, "  Suspended:  %s\n", suspStr)  //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "  Agents:\n")                  //nolint:errcheck // best-effort stdout
 
+	type rigAgentRow struct {
+		Name   string
+		Status string
+	}
+	var rows []rigAgentRow
 	for _, a := range agents {
 		sp0 := scaleParamsFor(&a)
 		if !a.SupportsInstanceExpansion() {
 			target := statusObservationTargetForIdentity(statusSnapshot, cityName, a.QualifiedName(), sessionTemplate)
 			obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
 			status := agentStatusLine(obs.Running, dops, target.runtimeSessionName, a.Suspended || obs.Suspended)
-			fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName(), status) //nolint:errcheck // best-effort stdout
+			rows = append(rows, rigAgentRow{Name: a.QualifiedName(), Status: status})
 		} else {
 			for _, qualifiedInstance := range discoverPoolInstances(a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp) {
 				target := statusObservationTargetForIdentity(statusSnapshot, cityName, qualifiedInstance, sessionTemplate)
 				obs := observeSessionTargetWithWarning("gc rig status", cityPath, store, sp, cfg, target, stderr)
 				status := agentStatusLine(obs.Running, dops, target.runtimeSessionName, a.Suspended || obs.Suspended)
-				fmt.Fprintf(stdout, "    %-12s%s\n", qualifiedInstance, status) //nolint:errcheck // best-effort stdout
+				rows = append(rows, rigAgentRow{Name: qualifiedInstance, Status: status})
 			}
 		}
+	}
+
+	colRows := make([][2]int, 0, len(rows))
+	for _, r := range rows {
+		colRows = append(colRows, [2]int{4, len(r.Name)})
+	}
+	col := statusSectionColumn(colRows)
+	for _, r := range rows {
+		fmt.Fprintf(stdout, "    %s%s%s\n", r.Name, padForColumn(4, len(r.Name), col), r.Status) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }

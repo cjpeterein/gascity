@@ -292,6 +292,66 @@ func TestCityStatusRigs(t *testing.T) {
 	}
 }
 
+func TestCityStatusLongNamesKeepStatusSeparator(t *testing.T) {
+	// Regression: when rig/agent names exceed the fixed-width column,
+	// the name and the status value used to collide with no separator.
+	// Each rendered line in the Agents, Named sessions, and Rigs blocks
+	// must keep at least one space (and ideally two) between the name
+	// and the value that follows.
+	longRig := "petereinc-gascity-pack"
+	sp := runtime.NewFake()
+	dops := newFakeDrainOps()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "gastown.polecat", Dir: longRig, MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			{Name: "gastown.witness", Dir: longRig, MaxActiveSessions: intPtr(1)},
+		},
+		Rigs: []config.Rig{
+			{Name: longRig, Path: "/home/user/" + longRig},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "gastown.witness", Dir: longRig, Mode: "always"},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doCityStatus(sp, dops, cfg, "/tmp/city", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+
+	// Each of these substrings represents the bug: name and status running
+	// together because the column width was too narrow.
+	bad := []string{
+		longRig + "/gastown.polecatscaled",
+		longRig + "/gastown.polecat-1stopped",
+		longRig + "/gastown.polecat-2stopped",
+		longRig + "/gastown.witnessstopped",
+		longRig + "/gastown.witnessdegraded",
+		longRig + "/gastown.witnessreserved-unmaterialized",
+	}
+	for _, b := range bad {
+		if strings.Contains(out, b) {
+			t.Errorf("status output collided name and value (%q present), got:\n%s", b, out)
+		}
+	}
+
+	// Affirmative: the widest names (the pool instances) should get the
+	// minimum 2-space gap before the value. Shorter names in the same
+	// section get more padding to align statuses.
+	mustHaveExactGap := []string{
+		longRig + "/gastown.polecat-1  stopped",
+		longRig + "/gastown.polecat-2  stopped",
+	}
+	for _, needle := range mustHaveExactGap {
+		if !strings.Contains(out, needle) {
+			t.Errorf("expected %q in output, got:\n%s", needle, out)
+		}
+	}
+}
+
 func TestCityStatusJSONEmpty(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{

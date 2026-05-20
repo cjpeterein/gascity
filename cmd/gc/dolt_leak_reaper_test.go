@@ -66,7 +66,7 @@ func reapLeakedTestDoltProcessesWith(
 ) int {
 	procs, err := enumerate()
 	if err != nil {
-		fmt.Fprintf(w, "TestMain dolt leak reaper: discoverDoltProcesses: %v\n", err)
+		fmt.Fprintf(w, "TestMain dolt leak reaper: discoverDoltProcesses: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 0
 	}
 	homeDir, _ := os.UserHomeDir()
@@ -92,18 +92,18 @@ func reapLeakedTestDoltProcessesWith(
 
 	for _, p := range leaked {
 		if err := kill(p.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-			fmt.Fprintf(w, "TestMain dolt leak reaper: SIGTERM pid=%d: %v\n", p.PID, err)
+			fmt.Fprintf(w, "TestMain dolt leak reaper: SIGTERM pid=%d: %v\n", p.PID, err) //nolint:errcheck // best-effort stderr
 		}
 	}
 	sleep(500 * time.Millisecond)
 	for _, p := range leaked {
 		if err := kill(p.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			fmt.Fprintf(w, "TestMain dolt leak reaper: SIGKILL pid=%d: %v\n", p.PID, err)
+			fmt.Fprintf(w, "TestMain dolt leak reaper: SIGKILL pid=%d: %v\n", p.PID, err) //nolint:errcheck // best-effort stderr
 		}
 	}
-	fmt.Fprintf(w, "TestMain dolt leak reaper: reaped %d leaked dolt sql-server process(es):\n", len(leaked))
+	fmt.Fprintf(w, "TestMain dolt leak reaper: reaped %d leaked dolt sql-server process(es):\n", len(leaked)) //nolint:errcheck // best-effort stderr
 	for _, p := range leaked {
-		fmt.Fprintf(w, "  pid=%d argv=%q\n", p.PID, strings.Join(p.Argv, " "))
+		fmt.Fprintf(w, "  pid=%d argv=%q\n", p.PID, strings.Join(p.Argv, " ")) //nolint:errcheck // best-effort stderr
 	}
 	return len(leaked)
 }

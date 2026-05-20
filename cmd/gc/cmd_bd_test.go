@@ -334,8 +334,19 @@ func TestResolveBdScopeTargetErrorsOnForeignRedirect(t *testing.T) {
 // test's synthesized city — the ambient redirect leaks into any test that
 // exercises CWD fallback. isolateBdCwd chdirs to a fresh tempdir so the
 // upward walk cannot reach those ambient redirects.
+//
+// Note: rigFromRedirectedBeadsDir gates upward redirect-walking on CWD
+// being inside cityPath (otherwise it returns nil error to avoid
+// surfacing unrelated worktree redirects when tests run with a CWD
+// outside the synthesized city tree). To reproduce the leak this test
+// guards against, the ambient redirect must live on the path between
+// cityPath and CWD. We arrange outer inside cityDir below.
 func TestIsolateBdCwdEscapesAmbientRedirectAbove(t *testing.T) {
-	outer := t.TempDir()
+	cityDir := t.TempDir()
+	outer := filepath.Join(cityDir, "outer")
+	if err := os.MkdirAll(outer, 0o755); err != nil {
+		t.Fatalf("MkdirAll(outer): %v", err)
+	}
 	foreign := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(outer, ".beads"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(outer .beads): %v", err)
@@ -349,7 +360,6 @@ func TestIsolateBdCwdEscapesAmbientRedirectAbove(t *testing.T) {
 	}
 	setCwd(t, inner)
 
-	cityDir := filepath.Join(t.TempDir(), "city")
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "demo"},
 		Rigs:      []config.Rig{{Name: "repo", Path: filepath.Join("rigs", "repo"), Prefix: "de"}},

@@ -478,19 +478,16 @@ func TestRefineryPromptRejectionFlowEnforcesClearOnMerge(t *testing.T) {
 	)
 }
 
-// TestRefineryFindWorkCapturesSEQBeforeQuery guards against the
-// regression in gc-ri3: if the formula captures the event sequence
-// cursor AFTER the bd-list query, a polecat handoff that lands
-// between the query and the SEQ capture gets an event sequence
-// already <= SEQ, so `gc events --watch --after=$SEQ` misses it
-// and the refinery sits idle until externally nudged. Capturing
-// SEQ first closes the race: any bead write that lands after the
-// query is guaranteed to produce an event with seq > SEQ.
-//
-// Also enforces the metadata.gc.routed_to fallback so the find-work
-// query is robust to drift between the $GC_AGENT identity string
-// and the assignee value the polecat writes.
-func TestRefineryFindWorkCapturesSEQBeforeQuery(t *testing.T) {
+// TestRefineryFindWorkHasMetadataFallback enforces the metadata.gc.routed_to
+// fallback in the find-work helper (the surviving half of gc-ri3): identity
+// drift between the $GC_AGENT string and the assignee value the polecat
+// writes must not strand a bead, since the polecat writes both assignee and
+// metadata.gc.routed_to to the same refinery identity. gc-ri3's other half
+// (SEQ-before-query + gc events --watch) was reverted upstream by
+// 0087e308 fix(formulas): replace event-watch hot-loop with fixed sleep,
+// after the watch-on-bead.updated path was observed hot-looping against
+// cache-reconcile traffic; the wait loop here uses sleep, not watch.
+func TestRefineryFindWorkHasMetadataFallback(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
 	data, err := os.ReadFile(path)
@@ -499,21 +496,10 @@ func TestRefineryFindWorkCapturesSEQBeforeQuery(t *testing.T) {
 	}
 	body := string(data)
 
-	// SEQ capture must appear before the first bd-list query inside
-	// the find-work wait loop.
-	assertContainsInOrder(t, body,
-		`SEQ=$(gc events --seq)`,
-		`WORK=$(find_work)`,
-		`gc events --watch --type=bead.updated \`,
-		`--after="$SEQ" --timeout "${TIMEOUT}s"`,
-	)
-
-	// Metadata fallback must be present in the find-work helper so
-	// identity drift between assignee and gc.routed_to cannot strand
-	// a bead.
 	for _, want := range []string{
-		`gc bd list --metadata-field "gc.routed_to=$GC_AGENT"`,
 		`find_work()`,
+		`gc bd list --metadata-field "gc.routed_to=$GC_AGENT"`,
+		`sleep {{event_timeout}}`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("refinery formula missing find-work safety net %q", want)

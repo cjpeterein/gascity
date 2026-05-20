@@ -373,7 +373,7 @@ transitive = false
 	}
 }
 
-func TestExpandPacks_RigImportsContributeDoctorsButNotCommands(t *testing.T) {
+func TestExpandPacks_RigImportsContributeCommandsAndDoctors(t *testing.T) {
 	dir := t.TempDir()
 	packDir := filepath.Join(dir, "helper")
 	cityDir := filepath.Join(dir, "city")
@@ -384,6 +384,7 @@ name = "helper"
 schema = 1
 `)
 	writeTestFile(t, packDir, "commands/status/run.sh", "#!/bin/sh\nexit 0\n")
+	writeTestFile(t, packDir, "commands/repo/sync/run.sh", "#!/bin/sh\nexit 0\n")
 	writeTestFile(t, packDir, "doctor/binaries/run.sh", "#!/bin/sh\nexit 0\n")
 
 	writeTestFile(t, cityDir, "city.toml", `
@@ -403,14 +404,92 @@ source = "../helper"
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
 
-	if len(cfg.PackCommands) != 0 {
-		t.Fatalf("got %d PackCommands, want 0 for rig import commands", len(cfg.PackCommands))
+	if len(cfg.PackCommands) != 2 {
+		t.Fatalf("got %d PackCommands, want 2 for rig import commands", len(cfg.PackCommands))
 	}
+	foundStatus := false
+	foundRepoSync := false
+	for _, cmd := range cfg.PackCommands {
+		if reflect.DeepEqual(cmd.Command, []string{"status"}) {
+			foundStatus = true
+			if cmd.BindingName != "helper" {
+				t.Fatalf("status BindingName = %q, want %q", cmd.BindingName, "helper")
+			}
+		}
+		if reflect.DeepEqual(cmd.Command, []string{"repo", "sync"}) {
+			foundRepoSync = true
+			if cmd.BindingName != "helper" {
+				t.Fatalf("repo sync BindingName = %q, want %q", cmd.BindingName, "helper")
+			}
+		}
+	}
+	if !foundStatus {
+		t.Fatal("missing imported status command from rig import")
+	}
+	if !foundRepoSync {
+		t.Fatal("missing imported repo sync command from rig import")
+	}
+
 	if len(cfg.PackDoctors) != 1 {
 		t.Fatalf("got %d PackDoctors, want 1 for rig import doctors", len(cfg.PackDoctors))
 	}
 	if cfg.PackDoctors[0].Name != "binaries" {
 		t.Fatalf("doctor Name = %q, want %q", cfg.PackDoctors[0].Name, "binaries")
+	}
+	if cfg.PackDoctors[0].BindingName != "helper" {
+		t.Fatalf("doctor BindingName = %q, want %q", cfg.PackDoctors[0].BindingName, "helper")
+	}
+}
+
+func TestExpandPacks_RigImportTransitiveFalseFiltersNestedCommands(t *testing.T) {
+	dir := t.TempDir()
+	parentDir := filepath.Join(dir, "parent")
+	childDir := filepath.Join(dir, "child")
+	cityDir := filepath.Join(dir, "city")
+
+	writeTestFile(t, childDir, "pack.toml", `
+[pack]
+name = "child"
+schema = 1
+`)
+	writeTestFile(t, childDir, "commands/repo/sync/run.sh", "#!/bin/sh\nexit 0\n")
+
+	writeTestFile(t, parentDir, "pack.toml", `
+[pack]
+name = "parent"
+schema = 1
+
+[imports.child]
+source = "../child"
+`)
+	writeTestFile(t, parentDir, "commands/status/run.sh", "#!/bin/sh\nexit 0\n")
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "frontend"
+path = "../rig"
+
+[rigs.imports.ops]
+source = "../parent"
+transitive = false
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	if len(cfg.PackCommands) != 1 {
+		t.Fatalf("got %d PackCommands, want 1 (only direct, not transitive)", len(cfg.PackCommands))
+	}
+	if !reflect.DeepEqual(cfg.PackCommands[0].Command, []string{"status"}) {
+		t.Fatalf("command = %#v, want [status]", cfg.PackCommands[0].Command)
+	}
+	if cfg.PackCommands[0].BindingName != "ops" {
+		t.Fatalf("BindingName = %q, want %q", cfg.PackCommands[0].BindingName, "ops")
 	}
 }
 

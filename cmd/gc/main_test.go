@@ -198,6 +198,17 @@ func (m cleanupTestingM) Run() int {
 }
 
 func TestMain(m *testing.M) {
+	// Scrub the env-var overrides that resolveManagedDoltRuntimeLayout honors.
+	// `gc prime` exports these into the agent's shell, and tests that derive a
+	// layout from t.TempDir() and then write under layout.DataDir would
+	// otherwise leak fixtures into the live data dir, panicking the production
+	// Dolt server on the next restart. Tests that need to assert override
+	// behavior re-set the relevant key with t.Setenv, which is per-test scoped.
+	for _, key := range managedDoltLayoutEnvOverrides {
+		if err := os.Unsetenv(key); err != nil {
+			panic(err)
+		}
+	}
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent
 	// already owns the fixtures. Just configure hooks and forward.

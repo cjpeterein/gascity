@@ -1481,10 +1481,7 @@ func TestDoltStatePreflightCleanCmdRemovesSocketsButPreservesDoltInternals(t *te
 		t.Skip("lsof not installed")
 	}
 	cityPath := t.TempDir()
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
-	if err != nil {
-		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
-	}
+	layout := resolveManagedDoltRuntimeLayoutForTest(t, cityPath)
 
 	phantomNomsDir := filepath.Join(layout.DataDir, "phantom", ".dolt", "noms")
 	if err := os.MkdirAll(phantomNomsDir, 0o755); err != nil {
@@ -1548,10 +1545,7 @@ func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 		t.Skip("lsof not installed")
 	}
 	cityPath := t.TempDir()
-	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
-	if err != nil {
-		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
-	}
+	layout := resolveManagedDoltRuntimeLayoutForTest(t, cityPath)
 
 	liveManifest := filepath.Join(layout.DataDir, "live", ".dolt", "noms", "manifest")
 	if err := os.MkdirAll(filepath.Dir(liveManifest), 0o755); err != nil {
@@ -1585,6 +1579,59 @@ func TestDoltStatePreflightCleanCmdPreservesLiveArtifacts(t *testing.T) {
 	}
 	if _, err := os.Stat(socketPath); err != nil {
 		t.Fatalf("live socket removed unexpectedly: %v", err)
+	}
+}
+
+// TestDoltStatePreflightCleanCmdDoesNotLeakWhenAmbientDoltDataDirIsSet is the
+// regression for gc-wfl4e. With ambient GC_DOLT_DATA_DIR (and friends) set —
+// as `gc prime` does in any active city — the patched preflight-clean test
+// flow must derive its layout from the test's t.TempDir() and never write
+// fixture databases into the sentinel data dir.
+func TestDoltStatePreflightCleanCmdDoesNotLeakWhenAmbientDoltDataDirIsSet(t *testing.T) {
+	sentinelData := t.TempDir()
+	sentinelPackState := filepath.Join(t.TempDir(), "packs", "dolt")
+	sentinelRuntime := filepath.Join(t.TempDir(), ".gc", "runtime")
+	t.Setenv("GC_DOLT_DATA_DIR", sentinelData)
+	t.Setenv("GC_PACK_STATE_DIR", sentinelPackState)
+	t.Setenv("GC_CITY_RUNTIME_DIR", sentinelRuntime)
+	t.Setenv("GC_DOLT_LOG_FILE", filepath.Join(sentinelPackState, "dolt.log"))
+	t.Setenv("GC_DOLT_STATE_FILE", filepath.Join(sentinelPackState, "dolt-provider-state.json"))
+	t.Setenv("GC_DOLT_PID_FILE", filepath.Join(sentinelPackState, "dolt.pid"))
+	t.Setenv("GC_DOLT_LOCK_FILE", filepath.Join(sentinelPackState, "dolt.lock"))
+	t.Setenv("GC_DOLT_CONFIG_FILE", filepath.Join(sentinelPackState, "dolt-config.yaml"))
+
+	cityPath := t.TempDir()
+	layout := resolveManagedDoltRuntimeLayoutForTest(t, cityPath)
+
+	wantDataDir := normalizePathForCompare(filepath.Join(cityPath, ".beads", "dolt"))
+	if layout.DataDir != wantDataDir {
+		t.Fatalf("layout.DataDir = %q, want %q (sentinel = %q)", layout.DataDir, wantDataDir, sentinelData)
+	}
+	if normalizePathForCompare(layout.DataDir) == normalizePathForCompare(sentinelData) {
+		t.Fatalf("layout.DataDir resolved to ambient sentinel %q", sentinelData)
+	}
+
+	for _, sub := range []string{"phantom", "stale", "healthy"} {
+		nomsDir := filepath.Join(layout.DataDir, sub, ".dolt", "noms")
+		if err := os.MkdirAll(nomsDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", nomsDir, err)
+		}
+	}
+	healthyManifest := filepath.Join(layout.DataDir, "healthy", ".dolt", "noms", "manifest")
+	if err := os.WriteFile(healthyManifest, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(sentinelData)
+	if err != nil {
+		t.Fatalf("ReadDir(sentinelData): %v", err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Fatalf("ambient GC_DOLT_DATA_DIR sentinel %q leaked entries: %v", sentinelData, names)
 	}
 }
 

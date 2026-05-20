@@ -6790,10 +6790,10 @@ func jsonlExportEnv(t *testing.T, cityDir, binDir, stateDir, archiveRepo, gcLog,
 		// tests keep exercising escalation at prev=100/current=10 (90% delta).
 		// The production default is higher (see jsonl-export.sh); tests that
 		// exercise the production default override this explicitly.
-		"GC_JSONL_SPIKE_THRESHOLD":       "20",
-		"GIT_CONFIG_GLOBAL":              filepath.Join(t.TempDir(), "gitconfig"),
-		"GIT_CONFIG_NOSYSTEM":            "1",
-		"PATH":                           binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GC_JSONL_SPIKE_THRESHOLD": "20",
+		"GIT_CONFIG_GLOBAL":        filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_CONFIG_NOSYSTEM":      "1",
+		"PATH":                     binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 }
 

@@ -434,6 +434,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 
 				rigAgents = append(rigAgents, agents...)
 				rigNamedSessions = append(rigNamedSessions, namedSessions...)
+				cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 				cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
 				// Runtime selection is city-wide, so rig-imported
 				// runtime packs register into the same namespace.

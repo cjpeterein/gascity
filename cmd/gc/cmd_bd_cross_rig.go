@@ -130,13 +130,20 @@ func runCrossRigBd(cityPath string, cfg *config.City, scopes []crossRigScope, bd
 
 		warnExternalBdOverrideDrift(stderr, cityPath, scope.Target)
 
+		env, err := bdCommandEnv(cityPath, cfg, scope.Target)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+			results = append(results, crossRigResult{scope: scope, err: err})
+			continue
+		}
+
 		var out bytes.Buffer
 		cmd := exec.Command(bdPath, bdArgs...)
 		cmd.Dir = scope.Target.ScopeRoot
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = &out
 		cmd.Stderr = stderr
-		cmd.Env = workQueryEnvForDir(bdCommandEnv(cityPath, cfg, scope.Target), cmd.Dir)
+		cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 
 		runErr := cmd.Run()
 		results = append(results, crossRigResult{scope: scope, out: out.Bytes(), err: runErr})

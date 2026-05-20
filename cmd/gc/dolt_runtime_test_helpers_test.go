@@ -11,6 +11,48 @@ import (
 	"time"
 )
 
+// managedDoltLayoutEnvOverrides lists the env vars that
+// resolveManagedDoltRuntimeLayout honors. Tests that derive a layout from
+// t.TempDir() and then write fixtures under layout.DataDir must scrub these
+// first so an ambient override (e.g., set by `gc prime` in the calling shell)
+// cannot redirect the writes into the live data dir.
+var managedDoltLayoutEnvOverrides = []string{
+	"GC_DOLT_DATA_DIR",
+	"GC_DOLT_LOG_FILE",
+	"GC_DOLT_STATE_FILE",
+	"GC_DOLT_PID_FILE",
+	"GC_DOLT_LOCK_FILE",
+	"GC_DOLT_CONFIG_FILE",
+	"GC_PACK_STATE_DIR",
+	"GC_CITY_RUNTIME_DIR",
+}
+
+// scrubManagedDoltLayoutEnv unsets every env var that
+// resolveManagedDoltRuntimeLayout honors, scoped to the test via t.Setenv.
+// Use it in any test that derives a layout from a t.TempDir() cityPath and
+// then writes under the resulting layout — without the scrub, an ambient
+// override would redirect those writes into a non-test data dir.
+func scrubManagedDoltLayoutEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range managedDoltLayoutEnvOverrides {
+		t.Setenv(key, "")
+	}
+}
+
+// resolveManagedDoltRuntimeLayoutForTest scrubs the env-var overrides via
+// scrubManagedDoltLayoutEnv and then resolves the layout from cityPath.
+// Use it instead of resolveManagedDoltRuntimeLayout in any test that follows
+// up with writes under layout.DataDir.
+func resolveManagedDoltRuntimeLayoutForTest(t *testing.T, cityPath string) managedDoltRuntimeLayout {
+	t.Helper()
+	scrubManagedDoltLayoutEnv(t)
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	return layout
+}
+
 func writeReachableManagedDoltState(t *testing.T, cityPath string) int {
 	t.Helper()
 

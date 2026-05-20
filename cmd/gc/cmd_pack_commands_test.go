@@ -262,6 +262,58 @@ func TestLegacyPackCommandHelpFlagUsesBuiltInHelp(t *testing.T) {
 	}
 }
 
+func TestRigScopedImportRegistersCLISubcommands(t *testing.T) {
+	dir := t.TempDir()
+	packDir := filepath.Join(dir, "helper")
+	cityDir := filepath.Join(dir, "city")
+
+	if err := os.MkdirAll(filepath.Join(packDir, "commands", "status"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"),
+		[]byte("[pack]\nname = \"helper\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "commands", "status", "run.sh"),
+		[]byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityTOML := `[workspace]
+name = "test"
+
+[[rigs]]
+name = "frontend"
+path = "../rig"
+
+[rigs.imports.helper]
+source = "../helper"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	root := &cobra.Command{Use: "gc"}
+	root.AddCommand(&cobra.Command{Use: "start"}) // simulate a core command
+	addDiscoveredCommandsToRoot(root, cfg.PackCommands, cityDir, "testcity", &bytes.Buffer{}, &bytes.Buffer{}, false)
+
+	helper := findSubcommand(root, "helper")
+	if helper == nil {
+		t.Fatal("rig-scoped import binding \"helper\" not registered as cobra subcommand")
+	}
+	if findSubcommand(helper, "status") == nil {
+		t.Fatal("rig-scoped import command status not registered under helper namespace")
+	}
+}
+
 func TestSetupPackCityWritesExpectedLayout(t *testing.T) {
 	cityPath, packDir := setupPackCity(t)
 	for _, path := range []string{

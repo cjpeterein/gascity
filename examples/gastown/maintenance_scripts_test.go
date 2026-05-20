@@ -2471,11 +2471,16 @@ exit 0
 		t.Errorf("reaper missing closed-wisp purge delete:\n%s", log)
 	} else {
 		purgeSQL := log[purgeIdx:]
+		coalesceTarget := "COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)"
 		if !strings.Contains(purgeSQL, "child_wisp.status IN ('open', 'hooked', 'in_progress')") ||
 			!strings.Contains(purgeSQL, "d.type = 'parent-child'") ||
-			!strings.Contains(purgeSQL, "SELECT DISTINCT d.depends_on_id") {
+			!strings.Contains(purgeSQL, coalesceTarget+" IS NOT NULL") {
 			t.Errorf("reaper purge can delete closed parents with non-closed children:\n%s", purgeSQL)
 		}
+	}
+
+	if strings.Contains(log, "d.depends_on_id") {
+		t.Errorf("reaper SQL references removed column dependencies.depends_on_id; use the typed columns or COALESCE projection instead:\n%s", log)
 	}
 
 	gcData, err := os.ReadFile(gcLog)

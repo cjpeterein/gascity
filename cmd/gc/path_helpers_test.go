@@ -29,7 +29,7 @@ import (
 // t.TempDir() removal. gc-ucmw.
 func newControllerStateTest(
 	t *testing.T,
-	ctx context.Context,
+	ctx context.Context, //nolint:revive // testing.T must precede context.Context for test-helper ergonomics
 	cfg *config.City,
 	sp runtime.Provider,
 	ep events.Provider,

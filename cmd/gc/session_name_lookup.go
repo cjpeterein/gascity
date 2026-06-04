@@ -175,6 +175,11 @@ func createPoolSessionBeadWithAlias(
 	}
 	instanceToken := sessionpkg.NewInstanceToken()
 	agentName := strings.TrimSpace(identity.AgentName)
+	// qualifiedInstance is the explicit instance identity supplied by the
+	// caller (e.g. "gascity/furiosa", "worker-1"). Empty when the caller
+	// only knows the template — that case falls back to PoolSessionName,
+	// which strips template paths through path.Base before sanitizing.
+	qualifiedInstance := agentName
 	title := targetBasename(template)
 	if agentName == "" {
 		agentName = template
@@ -215,18 +220,17 @@ func createPoolSessionBeadWithAlias(
 	if err != nil {
 		return beads.Bead{}, err
 	}
-	sessionName, err = derivePoolSessionName(store, cfg, template, agentName, bead.ID, resolvedTmuxAlias, sessionBeads)
+	sessionName, err = derivePoolSessionName(store, cfg, template, qualifiedInstance, bead.ID, resolvedTmuxAlias, sessionBeads)
 	if err != nil {
-		_ = store.Close(bead.ID)
-		return beads.Bead{}, err
-	}
-	if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
 		_ = store.Close(bead.ID)
 		return beads.Bead{}, err
 	}
 	if bead.Metadata == nil {
 		bead.Metadata = map[string]string{}
 	}
+	// The bead was created with a placeholder session_name derived from the
+	// instance token; only re-stamp through the deriver when the value
+	// actually changed, so caching stores can elide a redundant bd update.
 	if bead.Metadata["session_name"] != sessionName {
 		if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
 			_ = store.Close(bead.ID)

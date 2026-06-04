@@ -2429,11 +2429,6 @@ exit 0
 	if strings.Contains(log, "parent_id") {
 		t.Errorf("reaper SQL references parent_id (column does not exist in wisps):\n%s", log)
 	}
-	for _, notWant := range []string{"depends_on_wisp_id", "depends_on_issue_id"} {
-		if strings.Contains(log, notWant) {
-			t.Errorf("reaper SQL references split dependency target column %q; bd 1.0.4 uses depends_on_id:\n%s", notWant, log)
-		}
-	}
 	// mail was removed: not a SQL table; messages are beads with type=message.
 	if strings.Contains(log, ".mail") {
 		t.Errorf("reaper SQL references .mail table (does not exist in beads schema):\n%s", log)
@@ -2442,7 +2437,7 @@ exit 0
 		"SHOW COLUMNS FROM `beads`.dependencies",
 		"SHOW COLUMNS FROM `beads`.wisp_dependencies",
 		"FROM `beads`.wisp_dependencies d",
-		"SELECT DISTINCT d.depends_on_id",
+		"COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)",
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("reaper SQL missing %q:\n%s", want, log)
@@ -2479,6 +2474,8 @@ exit 0
 		}
 	}
 
+	// dependencies.depends_on_id was dropped in migrations 0043/0045; the
+	// reaper must project the typed columns through COALESCE instead.
 	if strings.Contains(log, "d.depends_on_id") {
 		t.Errorf("reaper SQL references removed column dependencies.depends_on_id; use the typed columns or COALESCE projection instead:\n%s", log)
 	}
@@ -3435,8 +3432,9 @@ exit 0
 	if !strings.Contains(log, "wisp_dependencies d") || !strings.Contains(log, "d.type = 'parent-child'") {
 		t.Fatalf("reaper stale-wisp close path does not use parent-child dependencies:\n%s", log)
 	}
-	if !strings.Contains(log, "d.depends_on_id = parent_wisp.id") || !strings.Contains(log, "d.depends_on_id = parent_issue.id") {
-		t.Fatalf("reaper stale-wisp close path does not use bd 1.0.4 dependency target column:\n%s", log)
+	depCoalesce := "COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)"
+	if !strings.Contains(log, depCoalesce+" = parent_wisp.id") || !strings.Contains(log, depCoalesce+" = parent_issue.id") {
+		t.Fatalf("reaper stale-wisp close path does not project the typed dependency target columns through COALESCE:\n%s", log)
 	}
 	if strings.Contains(log, "parent_wisp.id IS NULL AND parent_issue.id IS NULL") {
 		t.Fatalf("reaper closes stale wisps when parent liveness is unresolved:\n%s", log)

@@ -39,6 +39,15 @@ Subcommands:
 The weekly Dolt loop runs inside the supervisor process when
 [maintenance.dolt] enabled=true in city.toml. The hook installer is
 filesystem-only and does not require the controller to be up.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				fmt.Fprintln(stderr, "gc maintenance: missing subcommand (status|dolt-gc|install-hooks)") //nolint:errcheck // best-effort stderr
+			} else {
+				fmt.Fprintf(stderr, "gc maintenance: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
+			}
+			return errExit
+		},
 	}
 	cmd.AddCommand(newMaintenanceStatusCmd(stdout, stderr))
 	cmd.AddCommand(newMaintenanceDoltGCCmd(stdout, stderr))

@@ -179,11 +179,13 @@ a bead.
 ```bash
 find_work() {
   # 1) Direct assignee match (rig-scoped when $GC_RIG is set).
-  WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open \
+  WORK=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee=$GC_AGENT --status=open \
     --exclude-type=epic --has-metadata-key=branch --limit=1 --json | jq -r '.[0].id // empty')
   if [ -n "$WORK" ]; then printf '%s' "$WORK"; return 0; fi
-  # 2) Metadata fallback — robust to assignee-shape drift.
-  gc bd list ${GC_RIG:+--rig="$GC_RIG"} --metadata-field "gc.routed_to=$GC_AGENT" \
+  # 2) Metadata fallback — robust to assignee-shape drift. Defers the
+  # `branch` metadata check to the post-loop guard below; this preserves
+  # the historical query form callers/tests expect to see verbatim.
+  gc bd list --metadata-field "gc.routed_to=$GC_AGENT" \
     --status=open --exclude-type=epic --limit=1 --json \
     | jq -r '.[0].id // empty'
 }

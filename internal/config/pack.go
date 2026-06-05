@@ -247,7 +247,12 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			for _, bindingName := range importNames {
 				imp := rig.Imports[bindingName]
 
-				impDir, err := resolvePackRef(imp.Source, cityRoot, cityRoot)
+				// Rig-level remote imports must resolve through the same
+				// lock-driven shared cache (~/.gc/cache/repos) populated by
+				// `gc import install` that city-level imports use; the
+				// city-local `.gc/cache/includes` cache that resolvePackRef
+				// would consult has no populator.
+				impDir, err := resolveImportPackRef(imp.Source, cityRoot, cityRoot)
 				if err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}

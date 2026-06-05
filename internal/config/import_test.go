@@ -1901,6 +1901,73 @@ scope = "rig"
 	t.Error("worker agent not found under rig proj")
 }
 
+// TestImport_RigLevelRemoteImportFromLockfileCache covers the gc-m4c regression:
+// rig-scoped [rigs.imports.X] entries with remote sources must resolve through
+// the same lock-driven shared cache (~/.gc/cache/repos) used by city-level
+// [imports.X], not the unpopulated city-local .gc/cache/includes/ cache.
+//
+// The bug surfaced for sources with an explicit branch ref (e.g.
+// "https://example.com/repo.git#main"): resolvePackRef short-circuits the
+// lockfile lookup whenever a ref is present, falling back to fetchRemoteInclude
+// which reads from .gc/cache/includes/ — a directory no command populates.
+func TestImport_RigLevelRemoteImportFromLockfileCache(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+
+	cityDir := filepath.Join(dir, "city")
+	mustMkdirAll(t, cityDir, 0o755)
+
+	source := "https://github.com/example/gastown.git#main"
+	commit := stubCleanRepoCacheGit(t)
+	cacheDir := filepath.Join(home, ".gc", "cache", "repos", RepoCacheKey(source, commit))
+	mustMkdirAll(t, filepath.Join(cacheDir, ".git"), 0o755)
+	writeTestFile(t, cacheDir, "pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "polecat"
+scope = "rig"
+`)
+
+	writeTestFile(t, cityDir, "city.toml", fmt.Sprintf(`
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "proj"
+path = "/tmp/proj"
+
+[rigs.imports.gs]
+source = %q
+version = "^1.2"
+`, source))
+	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
+schema = 1
+
+[packs.%q]
+version = "1.2.3"
+commit = %q
+fetched = "2026-04-10T00:00:00Z"
+`, source, commit))
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	found := map[string]bool{}
+	for _, a := range explicit {
+		found[a.QualifiedName()] = true
+	}
+	if !found["proj/gs.polecat"] {
+		t.Errorf("missing proj/gs.polecat; got: %v", found)
+	}
+}
+
 func TestImport_NamedSessionBindingStamped(t *testing.T) {
 	// Named sessions from imports should get BindingName stamped.
 	dir := t.TempDir()

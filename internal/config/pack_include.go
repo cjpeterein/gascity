@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -245,10 +246,47 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
 		return validateInstalledRemoteCache(source, cacheDir, commit)
 	}); err != nil {
-		return err
+		// A synthetic bundled-pack cache is a deterministic projection of the
+		// running binary's embedded packs. When the only fault is a content-hash
+		// mismatch (the binary was rebuilt), the cache can be rebuilt in-process
+		// with no network. Self-heal that case instead of bricking every
+		// read-only command until a human runs "gc import install". Tamper and
+		// corruption failures (content drift, extra files, bad marker) are NOT
+		// hash mismatches and still hard-fail; remote git imports have no offline
+		// rebuild path and also keep their hard failure.
+		if !errors.Is(err, builtinpacks.ErrSyntheticContentHashMismatch) {
+			return err
+		}
+		if healErr := selfHealSyntheticCacheLocked(source, cacheRoot, cacheDir, commit); healErr != nil {
+			return healErr
+		}
+		fp = remoteCacheFingerprint(cacheDir)
 	}
 	remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: fp})
 	return nil
+}
+
+// selfHealSyntheticCacheLocked rematerializes a synthetic bundled-pack cache
+// under the repo-cache write lock. The read-lock validation already failed, so
+// this drops to the exclusive lock, re-validates (another process may have
+// healed the cache in the gap between unlocking and relocking), and only
+// rebuilds the cache if it is still invalid. Mirrors packman's
+// ensureBundledRepoInCacheLocked self-heal so both code paths share the same
+// recovery contract.
+func selfHealSyntheticCacheLocked(source, cacheRoot, cacheDir, commit string) error {
+	_, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
+		if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err == nil {
+			return "", nil
+		}
+		if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+			return "", fmt.Errorf("rematerializing synthetic cache for %s at %s: %w", source, cacheDir, err)
+		}
+		if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err != nil {
+			return "", fmt.Errorf("validating rematerialized synthetic cache for %s at %s: %w", source, cacheDir, err)
+		}
+		return "", nil
+	})
+	return err
 }
 
 // ResetRemoteCacheValidationCache clears memoized remote-cache validations

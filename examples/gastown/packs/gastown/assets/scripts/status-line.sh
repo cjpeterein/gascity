@@ -24,8 +24,11 @@ if [ -n "$__bd_trace_helper" ]; then
     . "$__bd_trace_helper" "status-line:$agent"
 fi
 
-# Count pending work items (non-empty lines from gc hook).
-w=$(gc hook "$agent" 2>/dev/null | grep -c . || true)
+# Count pending work items. `gc hook` prints a JSON array, so the count is
+# the array length, not the line count. An empty hook is the literal `[]`,
+# which is one non-empty line; counting lines reported 1 for no work. jq is
+# a standard dependency of the gastown pack scripts that parse gc/bd JSON.
+w=$(gc hook "$agent" 2>/dev/null | jq 'length' 2>/dev/null || true)
 
 # Count unread mail (first word of gc mail check output is the count).
 m=$(gc mail check "$agent" 2>/dev/null | awk '{print $1+0}' || true)
@@ -34,3 +37,8 @@ m=$(gc mail check "$agent" 2>/dev/null | awk '{print $1+0}' || true)
 printf '%s' "$agent"
 [ "${w:-0}" -gt 0 ] && printf ' | 🪝 %d' "$w"
 [ "${m:-0}" -gt 0 ] && printf ' | 📬 %d' "$m"
+
+# Honor the always-exit-0 contract: the final `[ ]` short-circuits to a
+# non-zero status whenever its segment is omitted, and tmux must never see
+# an error from a #(command) helper.
+exit 0

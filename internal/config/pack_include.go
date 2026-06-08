@@ -368,19 +368,37 @@ var remoteCacheValidationCache sync.Map // cacheDir+"\x00"+commit -> remoteCache
 
 type remoteCacheValidationEntry struct{ fingerprint string }
 
-// remoteCacheFingerprint is a cheap change signal for a remote cache checkout:
-// the size+mtime of the checkout root, its .git dir, and the git index. Git
-// checkout/status touch .git and the index; `gc import install` rewrites the
-// tree. A nested manual worktree edit touching none of these escapes detection
-// until the process restarts — acceptable for a pinned, gc-managed cache.
+// remoteCacheFingerprint is a cheap change signal for a remote cache checkout.
+// It must move when `gc import install` rewrites the cache but stay constant
+// across the `git status` that validation itself runs — otherwise the memo
+// self-invalidates and every config load re-execs git (gc-0kc).
+//
+// `git status` perturbs two signals that a naive fingerprint would trip over:
+//   - the `.git` directory mtime, bumped by `index.lock` create/unlink, and
+//   - the `.git/index` mtime, bumped by git refreshing the index stat-cache
+//     (racy-clean protection) on a freshly checked-out tree.
+//
+// So neither the `.git` directory nor the index mtime can be trusted. The
+// fingerprint instead keys on signals `git status` never writes but install
+// always does: the checkout root (size+mtime), `.git/HEAD` (size+mtime — every
+// install re-checkout rewrites it), and the index *size* (mtime excluded). A
+// nested manual worktree edit touching none of these escapes detection until
+// the process restarts — acceptable for a pinned, gc-managed cache.
 func remoteCacheFingerprint(cacheDir string) string {
 	var b strings.Builder
-	for _, p := range []string{cacheDir, filepath.Join(cacheDir, ".git"), filepath.Join(cacheDir, ".git", "index")} {
+	statBoth := func(p string) {
 		if fi, err := os.Stat(p); err == nil {
 			fmt.Fprintf(&b, "%d:%d;", fi.Size(), fi.ModTime().UnixNano())
 		} else {
 			b.WriteString("-;")
 		}
+	}
+	statBoth(cacheDir)
+	statBoth(filepath.Join(cacheDir, ".git", "HEAD"))
+	if fi, err := os.Stat(filepath.Join(cacheDir, ".git", "index")); err == nil {
+		fmt.Fprintf(&b, "%d;", fi.Size())
+	} else {
+		b.WriteString("-;")
 	}
 	return b.String()
 }

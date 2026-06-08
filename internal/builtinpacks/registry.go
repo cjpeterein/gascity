@@ -4,6 +4,7 @@ package builtinpacks
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -39,6 +40,14 @@ const (
 
 	syntheticMarkerFile = ".gc-bundled-pack-cache.toml"
 )
+
+// ErrSyntheticContentHashMismatch marks a synthetic cache whose marker is
+// well-formed and addresses the requested commit, but whose content hash was
+// produced by a different gc binary. This is the benign post-rebuild state: the
+// cache is recoverable in-process by rematerializing from the current binary's
+// embedded packs. Callers distinguish it (via errors.Is) from tamper or
+// corruption failures, which must not be silently overwritten.
+var ErrSyntheticContentHashMismatch = errors.New("bundled pack cache content hash does not match current binary")
 
 // Pack describes a bundled pack and its canonical import source. Bundled
 // sources resolve to the pack content embedded in the running gc binary.
@@ -336,7 +345,7 @@ func ValidateSyntheticRepo(dir, commit string) error {
 		return err
 	}
 	if marker.ContentHash != wantHash {
-		return fmt.Errorf("bundled pack cache content hash %q does not match current binary %q", marker.ContentHash, wantHash)
+		return fmt.Errorf("%w (%q vs %q)", ErrSyntheticContentHashMismatch, marker.ContentHash, wantHash)
 	}
 	if err := validateSyntheticRepoFileSet(dir); err != nil {
 		return err

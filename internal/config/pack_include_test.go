@@ -11,6 +11,10 @@ import (
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 )
 
+// syntheticMarkerName mirrors builtinpacks' unexported marker filename. The
+// tests below corrupt it directly to simulate a stale binary-content hash.
+const syntheticMarkerName = ".gc-bundled-pack-cache.toml"
+
 func TestIsRemoteInclude(t *testing.T) {
 	tests := []struct {
 		input string
@@ -516,4 +520,102 @@ func TestRepoCacheKeyUnchangedForNonSyntheticSources(t *testing.T) {
 func repoCacheKeyTestSum(identity string) string {
 	sum := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%x", sum[:])
+}
+
+// staleSyntheticCache materializes a valid synthetic cache for a bundled pack
+// source then rewrites its marker with a bogus content hash, reproducing the
+// post-rebuild state where the cache was built by a different binary.
+func staleSyntheticCache(t *testing.T, source, commit string) (cacheRoot, cacheDir string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cacheRoot = filepath.Join(home, ".gc", "cache", "repos")
+	cacheDir = filepath.Join(cacheRoot, RepoCacheKey(source, commit))
+
+	if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
+		t.Fatalf("materialize synthetic cache: %v", err)
+	}
+	staleMarker := fmt.Sprintf(
+		"schema = 1\nrepository = %q\ncommit = %q\ncontent_hash = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n",
+		builtinpacks.Repository, commit)
+	if err := os.WriteFile(filepath.Join(cacheDir, syntheticMarkerName), []byte(staleMarker), 0o644); err != nil {
+		t.Fatalf("corrupt marker: %v", err)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err == nil {
+		t.Fatal("expected stale synthetic cache to fail validation before self-heal")
+	}
+	return cacheRoot, cacheDir
+}
+
+func TestValidateInstalledRemoteCacheLockedSelfHealsSyntheticCache(t *testing.T) {
+	ResetRemoteCacheValidationCache()
+	t.Cleanup(ResetRemoteCacheValidationCache)
+
+	source := builtinpacks.MustSource("core")
+	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	cacheRoot, cacheDir := staleSyntheticCache(t, source, commit)
+
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+		t.Fatalf("expected stale synthetic cache to self-heal, got error: %v", err)
+	}
+
+	// The cache must now validate against the current binary content.
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err != nil {
+		t.Fatalf("synthetic cache was not rematerialized: %v", err)
+	}
+}
+
+func TestResolveLockedRemoteImportSelfHealsSyntheticCache(t *testing.T) {
+	ResetRemoteCacheValidationCache()
+	t.Cleanup(ResetRemoteCacheValidationCache)
+
+	source := builtinpacks.MustSource("core")
+	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	_, cacheDir := staleSyntheticCache(t, source, commit)
+
+	cityDir := t.TempDir()
+	writeTestFile(t, cityDir, "packs.lock", fmt.Sprintf(`
+schema = 1
+
+[packs.%q]
+version = "sha:%s"
+commit = %q
+fetched = "2026-06-06T00:00:00Z"
+`, source, commit, commit))
+
+	got, ok, err := resolveLockedRemoteImport(source, cityDir)
+	if err != nil {
+		t.Fatalf("resolveLockedRemoteImport: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected locked import to resolve")
+	}
+	if got != cacheDir {
+		t.Fatalf("resolveLockedRemoteImport = %q, want %q", got, cacheDir)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err != nil {
+		t.Fatalf("synthetic cache was not rematerialized: %v", err)
+	}
+}
+
+func TestValidateInstalledRemoteCacheLockedRemoteGitStillHardFails(t *testing.T) {
+	ResetRemoteCacheValidationCache()
+	t.Cleanup(ResetRemoteCacheValidationCache)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	const source = "git@github.com:example/pack"
+	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
+	mustMkdirAll(t, cacheRoot, 0o755)
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
+
+	err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit)
+	if err == nil {
+		t.Fatal("expected remote git cache miss to hard-fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "gc import install") {
+		t.Fatalf("error = %v, want hard-fail with \"gc import install\" hint", err)
+	}
 }

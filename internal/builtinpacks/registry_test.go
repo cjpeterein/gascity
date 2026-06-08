@@ -2,6 +2,7 @@ package builtinpacks
 
 import (
 	"bytes"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -209,6 +210,29 @@ schema = 1
 	}
 	if !strings.Contains(err.Error(), "content differs") {
 		t.Fatalf("error = %v, want content differs", err)
+	}
+	if errors.Is(err, ErrSyntheticContentHashMismatch) {
+		t.Fatal("tampered content must not be classified as a recoverable hash mismatch")
+	}
+}
+
+func TestValidateSyntheticRepoContentHashMismatchIsRecoverable(t *testing.T) {
+	dst := materializeTestRepo(t)
+	staleMarker := []byte(`schema = 1
+repository = "` + Repository + `"
+commit = "` + testCommit + `"
+content_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+`)
+	if err := os.WriteFile(filepath.Join(dst, syntheticMarkerFile), staleMarker, 0o644); err != nil {
+		t.Fatalf("rewrite marker: %v", err)
+	}
+
+	err := ValidateSyntheticRepo(dst, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepo accepted stale content hash")
+	}
+	if !errors.Is(err, ErrSyntheticContentHashMismatch) {
+		t.Fatalf("error = %v, want ErrSyntheticContentHashMismatch", err)
 	}
 }
 

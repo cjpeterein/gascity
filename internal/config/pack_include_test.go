@@ -528,7 +528,7 @@ func TestValidateInstalledRemoteCacheLockedSelfHealsAbsentSyntheticCache(t *test
 	t.Setenv(RepoCacheRootEnv, "")
 
 	source := builtinpacks.MustSource("core")
-	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
 	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
 

@@ -15,7 +15,7 @@ import (
 func TestEnsureBundledLockedRemoteImportsCachedHydratesBundledLockEntry(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	isolateRepoCacheRoot(t)
 	cityPath := t.TempDir()
 	source := config.PublicGastownPackSource
 	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
@@ -25,7 +25,14 @@ func TestEnsureBundledLockedRemoteImportsCachedHydratesBundledLockEntry(t *testi
 		t.Fatalf("ensureBundledLockedRemoteImportsCached returned error: %v", err)
 	}
 
-	cacheDir := filepath.Join(home, ".gc", "cache", "repos", packman.RepoCacheKey(source, commit))
+	// The hydration writes through config.RepoCacheRoot (the SSOT, which
+	// honors GC_REPO_CACHE_ROOT and GC_HOME), so the assertion must resolve
+	// the root the same way instead of hardcoding $HOME/.gc/cache/repos.
+	root, err := config.RepoCacheRoot()
+	if err != nil {
+		t.Fatalf("RepoCacheRoot: %v", err)
+	}
+	cacheDir := filepath.Join(root, packman.RepoCacheKey(source, commit))
 	if _, err := os.Stat(filepath.Join(cacheDir, ".gc-bundled-pack-cache.toml")); err != nil {
 		t.Fatalf("bundled cache marker stat error: %v", err)
 	}

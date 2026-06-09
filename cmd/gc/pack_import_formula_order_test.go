@@ -178,6 +178,13 @@ source = "`+gastownPackDir+`"
 	if !ok {
 		t.Fatalf("missing digest-generate order in %#v", discovered)
 	}
+	// The digest is a single town-wide report, so it must be city-scoped:
+	// without scope=city it would register once per importing rig, each with
+	// an independent cooldown marker, mailing the mayor a duplicate per rig
+	// per day (gc-ed6).
+	if !digest.IsCityScoped() {
+		t.Fatalf("digest Scope = %q, want \"city\" so it registers once town-wide", digest.Scope)
+	}
 	if digest.Source != filepath.Join(gastownPackDir, "orders", "digest-generate.toml") {
 		t.Fatalf("digest source = %q, want nested gastown order", digest.Source)
 	}

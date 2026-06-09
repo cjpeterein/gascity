@@ -132,6 +132,13 @@ func TestMaterializeSyntheticRepoProductionCallersStayInPackman(t *testing.T) {
 	repoRoot := testRepoRoot(t)
 	allowed := map[string]bool{
 		"internal/packman/cache.go": true,
+		// Fork read-path self-heal (gc-50z): packman imports config, so the
+		// read/validate path in config cannot delegate to packman's writer
+		// without an upward-dependency cycle. After #3245 keyed synthetic
+		// caches by binary content hash, a rebuilt binary lands on a fresh
+		// cache dir and the read path must rematerialize in-process or every
+		// `gc bd` bricks until a human runs `gc import install`.
+		"internal/config/pack_include.go": true,
 	}
 	var offenders []string
 	if err := filepath.WalkDir(repoRoot, func(path string, entry fs.DirEntry, err error) error {

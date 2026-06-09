@@ -319,6 +319,12 @@ func (c *CachingStore) runReconciliation() {
 				}
 				continue
 			}
+			if old, exists := c.beads[id]; exists && reconcileBackingStale(old, freshBead) {
+				if _, ok := c.deps[id]; !ok {
+					nextDepsComplete = false
+				}
+				continue
+			}
 			freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
 
 			old, exists := c.beads[id]
@@ -422,9 +428,22 @@ func (c *CachingStore) runReconciliation() {
 			preservedRecentLocal = true
 			c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 		}
-		freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
+		preservedStale := false
+		if !preservedRecentLocal {
+			if old, exists := c.beads[id]; exists && reconcileBackingStale(old, freshBead) {
+				beadForCache = old
+				preservedStale = true
+				if deps, ok := c.deps[id]; ok {
+					nextDeps[id] = cloneDeps(deps)
+				}
+			}
+		}
+		preserved := preservedRecentLocal || preservedStale
+		if !preservedStale {
+			freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
+			nextDeps[id] = cloneDeps(freshDeps)
+		}
 		nextBeads[id] = cloneBead(beadForCache)
-		nextDeps[id] = cloneDeps(freshDeps)
 
 		old, exists := c.beads[id]
 		switch {
@@ -434,13 +453,13 @@ func (c *CachingStore) runReconciliation() {
 				eventType: "bead.created",
 				bead:      cloneBead(beadForCache),
 			})
-		case !preservedRecentLocal && beadChanged(old, freshBead, true):
+		case !preserved && beadChanged(old, freshBead, true):
 			updates++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.updated",
 				bead:      cloneBead(freshBead),
 			})
-		case !preservedRecentLocal && depsChanged(c.deps[id], freshDeps):
+		case !preserved && depsChanged(c.deps[id], nextDeps[id]):
 			updates++
 			notifications = append(notifications, cacheNotification{
 				eventType: "bead.updated",
@@ -547,6 +566,22 @@ func (c *CachingStore) reconcileSuccessLogLocked(now time.Time, elapsed time.Dur
 		"beads cache: reconciled rig=%s beads=%d adds=%d updates=%d removes=%d took=%s cadence=%s",
 		rig, len(c.beads), adds, updates, removes, elapsed.Round(time.Millisecond), cadence,
 	), true
+}
+
+// reconcileBackingStale reports whether a reconcile full-scan row is older
+// than the cached row and therefore must not overwrite it. A stale backing
+// List — an earlier Dolt revision or a JSONL mirror lagging the live store —
+// can return a just-closed bead as still open; without this guard the diff
+// resurrects it and emits a spurious reopen ~20 s after the close
+// (gc-62iua). updated_at is stamped by the backing store on every write and
+// advances monotonically across all store implementations, so a cached row
+// with a strictly newer timestamp is authoritative over the scan row. Both
+// timestamps must be present: a zero on either side is treated as "not
+// stale" so the normal diff path still runs.
+func reconcileBackingStale(current, fresh Bead) bool {
+	return !current.UpdatedAt.IsZero() &&
+		!fresh.UpdatedAt.IsZero() &&
+		current.UpdatedAt.After(fresh.UpdatedAt)
 }
 
 func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap map[string][]Dep, useFreshDeps bool) []Dep {

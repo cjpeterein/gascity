@@ -111,6 +111,17 @@ Each tick of `controllerLoop()` (`cmd/gc/controller.go:268-320`) performs:
    individually. Each agent gets its environment, prompt, hooks, overlay,
    and session setup expanded.
 
+   Suspension is a data-plane gate as well as a control-plane gate: a
+   suspended rig's bead store must stay cold. Order dispatch skips orders
+   targeting suspended rigs (`orderRigSuspended`), and the controller's
+   background order-tracking sweep and retention watchdogs skip suspended
+   rigs' stores too (`filterSuspendedRigSweepTargets`). Otherwise each
+   automatic deletion would commit to the suspended rig's Dolt database,
+   so suspending a rig would not actually make it cold. The explicit
+   `gc order sweep-tracking` CLI is intentionally left unfiltered so an
+   operator can reclaim a suspended rig on demand. The store remains
+   readable while suspended.
+
 3. **Reconciliation** (`reconcileSessionBeads()`): Declarative convergence --
    make session beads and running sessions match the desired list. See
    [Health Patrol](health-patrol.md) for the reconciliation state machine,

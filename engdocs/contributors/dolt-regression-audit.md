@@ -258,6 +258,31 @@ not in the current live `dolt` label snapshot:
   session and mail flows a real bead store instead of an exec provider that
   only answered lifecycle commands.
 
+### `fixes: gc-wfl4e` / `gc-7kp0d` cmd/gc tests leak fixtures into the live Dolt data dir
+
+- Historical failure:
+  `resolveManagedDoltRuntimeLayout` honors `GC_DOLT_DATA_DIR` (and the other
+  `GC_DOLT_*`/`GC_PACK_STATE_DIR`/`GC_CITY_RUNTIME_DIR` overrides) before the
+  `cityPath` fallback. `gc prime` exports those inside any active city, so
+  `go test ./cmd/gc/...` from a primed shell wrote `phantom/`, `stale/`, and
+  `healthy/` preflight fixtures into the production data dir instead of the
+  test's `t.TempDir()`. The 3-byte `healthy/.dolt/noms/manifest` escaped the
+  phantom-db dog's missing-manifest check and crash-looped Dolt via
+  `enforceSingleFormat` on the next supervisor restart.
+- Regression tests:
+  - `cmd/gc/cmd_dolt_state_test.go`: `TestDoltStatePreflightCleanCmdDoesNotLeakWhenAmbientDoltDataDirIsSet`
+  - `examples/dolt/dog_exec_scripts_test.go`: `TestPhantomDBScriptFlagsUndersizedManifest`, `TestPhantomDBScriptHonorsManifestThresholdOverride`
+- Why this branch closes it:
+  `cmd/gc` `TestMain` now unsets the leaking overrides and the preflight-clean
+  tests derive their layout through `resolveManagedDoltRuntimeLayoutForTest`,
+  which ignores ambient env. Running `go test ./cmd/gc/...` from inside a live
+  city is therefore safe — the suite can no longer target the production data
+  dir. As defense in depth, the phantom-db dog
+  (`examples/dolt/assets/scripts/mol-dog-phantom-db.sh`) now also flags any
+  `noms/manifest` below `GC_PHANTOM_MANIFEST_MIN_BYTES` (default 32), so a
+  future fixture leak under a different directory name is still caught before
+  the next restart.
+
 ## Detailed PR Entries
 
 ### `supersedes: #454` stale `GC_DOLT_PORT` in `DoltServerCheck`

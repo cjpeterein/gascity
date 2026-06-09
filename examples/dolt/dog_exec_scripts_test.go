@@ -3276,6 +3276,12 @@ func TestCompactScriptBareGCDisabledWhenEnvFalsy(t *testing.T) {
 	}
 }
 
+// realDoltManifest is a manifest body wide enough to clear the phantom-db
+// dog's byte-sanity threshold. A genuine noms manifest is hundreds of bytes
+// (format version, store version, lock hash, root hash, table tuples); the
+// fixtures that crash-looped Dolt in gc-wfl4e were 3 bytes ("ok\n").
+const realDoltManifest = "5:__DOLT__:0123456789abcdefghijklmnopqrstuv:fedcba9876543210fedcba9876543210:0"
+
 func TestPhantomDBScriptEscalatesAndPreservesAllDatabases(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
@@ -3291,11 +3297,11 @@ func TestPhantomDBScriptEscalatesAndPreservesAllDatabases(t *testing.T) {
 			t.Fatalf("mkdir %s: %v", path, err)
 		}
 	}
-	writeTestFile(t, filepath.Join(dataDir, "valid", ".dolt", "noms", "manifest"), "ok")
-	writeTestFile(t, filepath.Join(dataDir, "orders.replaced-20260509T010203Z", ".dolt", "noms", "manifest"), "ok")
+	writeTestFile(t, filepath.Join(dataDir, "valid", ".dolt", "noms", "manifest"), realDoltManifest)
+	writeTestFile(t, filepath.Join(dataDir, "orders.replaced-20260509T010203Z", ".dolt", "noms", "manifest"), realDoltManifest)
 
 	out := runDogScript(t, "mol-dog-phantom-db.sh", binDir, cityPath, dataDir)
-	if !strings.Contains(out, "phantoms: 1") || !strings.Contains(out, "retired: 1") || !strings.Contains(out, "escalated: 2") {
+	if !strings.Contains(out, "phantoms: 1") || !strings.Contains(out, "retired: 1") || !strings.Contains(out, "undersized: 0") || !strings.Contains(out, "escalated: 2") {
 		t.Fatalf("unexpected phantom summary:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "phantom", ".dolt")); err != nil {
@@ -3333,6 +3339,88 @@ func TestPhantomDBScriptEscalatesAndPreservesAllDatabases(t *testing.T) {
 	}
 	if strings.Contains(gcLog, "phantom database(s)") {
 		t.Fatalf("escalation should not label all unservables as phantoms:\n%s", gcLog)
+	}
+}
+
+// TestPhantomDBScriptFlagsUndersizedManifest is the gc-wfl4e defense-in-depth
+// regression. The original leak wrote a "healthy" fixture whose noms/manifest
+// existed but held only "ok\n" (3 bytes). That manifest cleared the dog's
+// existence check, escaped quarantine, and crash-looped Dolt via
+// enforceSingleFormat on the next supervisor restart. The dog now also rejects
+// any manifest below GC_PHANTOM_MANIFEST_MIN_BYTES (default 32) so a fixture
+// leak with a different directory name is still caught.
+func TestPhantomDBScriptFlagsUndersizedManifest(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+
+	for _, path := range []string{
+		filepath.Join(dataDir, "valid", ".dolt", "noms"),
+		filepath.Join(dataDir, "healthy", ".dolt", "noms"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+	}
+	writeTestFile(t, filepath.Join(dataDir, "valid", ".dolt", "noms", "manifest"), realDoltManifest)
+	// The exact leaked fixture body from the gc-wfl4e crash loop.
+	writeTestFile(t, filepath.Join(dataDir, "healthy", ".dolt", "noms", "manifest"), "ok\n")
+
+	out := runDogScript(t, "mol-dog-phantom-db.sh", binDir, cityPath, dataDir)
+	if !strings.Contains(out, "phantoms: 0") || !strings.Contains(out, "undersized: 1") || !strings.Contains(out, "escalated: 1") {
+		t.Fatalf("unexpected phantom summary:\n%s", out)
+	}
+	// Read-only: the dog must not move or delete the undersized database.
+	if _, err := os.Stat(filepath.Join(dataDir, "healthy", ".dolt", "noms", "manifest")); err != nil {
+		t.Fatalf("undersized database moved unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "valid", ".dolt", "noms", "manifest")); err != nil {
+		t.Fatalf("valid database should remain: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dataDir, ".quarantine", "*"))
+	if err != nil {
+		t.Fatalf("glob quarantine: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("quarantine directory non-empty: got %d entries: %v", len(matches), matches)
+	}
+	gcLogData, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	gcLog := string(gcLogData)
+	if !strings.Contains(gcLog, "unservable database directories") {
+		t.Fatalf("escalation should use neutral unservable wording:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "Undersized manifests (below sanity threshold): 1 healthy") {
+		t.Fatalf("escalation should report undersized manifests separately:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "--from controller") {
+		t.Fatalf("phantom-db escalation mail must pass --from controller so it is not attributed to 'human':\n%s", gcLog)
+	}
+}
+
+// TestPhantomDBScriptHonorsManifestThresholdOverride proves the byte-sanity
+// threshold is configurable so a deployment with an unusually small but real
+// manifest can opt out without losing the missing-manifest phantom scan.
+func TestPhantomDBScriptHonorsManifestThresholdOverride(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	binDir := t.TempDir()
+	writeDogFakeGC(t, binDir)
+
+	nomsDir := filepath.Join(dataDir, "small", ".dolt", "noms")
+	if err := os.MkdirAll(nomsDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", nomsDir, err)
+	}
+	// 3-byte manifest that would trip the default 32-byte threshold.
+	writeTestFile(t, filepath.Join(nomsDir, "manifest"), "ok\n")
+
+	out := runDogScript(t, "mol-dog-phantom-db.sh", binDir, cityPath, dataDir,
+		"GC_PHANTOM_MANIFEST_MIN_BYTES=0")
+	if !strings.Contains(out, "phantoms: 0") || !strings.Contains(out, "undersized: 0") || !strings.Contains(out, "valid: 1") {
+		t.Fatalf("threshold override should treat the small manifest as valid:\n%s", out)
 	}
 }
 

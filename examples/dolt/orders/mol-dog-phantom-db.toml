@@ -1,5 +1,6 @@
 # Converted from formula+pool to exec. Phantom-DB detection is a pure
-# filesystem scan: dirs with .dolt/ but no noms/manifest and retired
+# filesystem scan: dirs with .dolt/ but no noms/manifest, dirs whose
+# noms/manifest is below the byte-sanity threshold, and retired
 # replacements are unservable and escalated without moving or deleting
 # files. No LLM judgment needed — runs inline in the controller.
 [order]

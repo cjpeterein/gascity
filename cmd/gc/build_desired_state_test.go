@@ -4656,7 +4656,7 @@ func TestCreatePoolSessionBeadWithGuardedAliasDropsTmuxAliasWhenIdentifierLockFa
 		t.Fatalf("createPoolSessionBeadWithGuardedAlias: %v", err)
 	}
 
-	want := PoolSessionName("worker", bead.ID)
+	want := PoolSessionNameForInstance("worker-1", bead.ID)
 	if got := bead.Metadata["session_name"]; got != want {
 		t.Fatalf("session_name = %q, want unique pool fallback %q when tmux_alias lock fails", got, want)
 	}

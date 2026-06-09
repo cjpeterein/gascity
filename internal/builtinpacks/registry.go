@@ -48,6 +48,15 @@ const (
 // corruption failures, which must not be silently overwritten.
 var ErrSyntheticContentHashMismatch = errors.New("bundled pack cache content hash does not match current binary")
 
+// ErrSyntheticCacheMissing marks a synthetic cache that is simply absent — no
+// cache directory or no marker file. This is the cold/isolated cache-root state
+// (a fresh GC_HOME or GC_REPO_CACHE_ROOT). Like a content-hash mismatch it is
+// recoverable in-process by materializing from the current binary's embedded
+// packs, with no network. Callers distinguish it (via errors.Is) from tamper or
+// corruption failures (bad schema, repo/commit mismatch, content drift), which
+// must not be silently overwritten.
+var ErrSyntheticCacheMissing = errors.New("missing bundled pack cache marker")
+
 // Pack describes a bundled pack and its canonical import source. Bundled
 // sources resolve to the pack content embedded in the running gc binary.
 type Pack struct {
@@ -196,7 +205,7 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("missing bundled pack cache marker")
+			return ErrSyntheticCacheMissing
 		}
 		return fmt.Errorf("checking bundled pack cache root: %w", err)
 	}
@@ -210,7 +219,7 @@ func ValidateSyntheticRepo(dir, commit string) error {
 	data, err := os.ReadFile(filepath.Join(dir, syntheticMarkerFile))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("missing bundled pack cache marker")
+			return ErrSyntheticCacheMissing
 		}
 		return fmt.Errorf("reading bundled pack cache marker: %w", err)
 	}

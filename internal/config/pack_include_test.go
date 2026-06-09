@@ -444,6 +444,32 @@ func TestValidateInstalledRemoteCacheLockedSelfHealsSyntheticCache(t *testing.T)
 	}
 }
 
+func TestValidateInstalledRemoteCacheLockedSelfHealsAbsentSyntheticCache(t *testing.T) {
+	ResetRemoteCacheValidationCache()
+	t.Cleanup(ResetRemoteCacheValidationCache)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", "")
+	t.Setenv(RepoCacheRootEnv, "")
+
+	source := builtinpacks.MustSource("core")
+	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
+
+	// A cold/isolated cache root has no synthetic cache materialized yet. The
+	// bundled synthetic cache is a deterministic projection of the running
+	// binary, so a missing cache must self-heal in-process rather than
+	// hard-fail with "gc import install" (gc-c7l defense-in-depth).
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
+		t.Fatalf("expected absent synthetic cache to self-heal, got error: %v", err)
+	}
+	if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err != nil {
+		t.Fatalf("synthetic cache was not materialized: %v", err)
+	}
+}
+
 func TestResolveLockedRemoteImportSelfHealsSyntheticCache(t *testing.T) {
 	ResetRemoteCacheValidationCache()
 	t.Cleanup(ResetRemoteCacheValidationCache)

@@ -63,6 +63,9 @@ func repoCacheRootCandidates() []string {
 		}
 		roots = append(roots, abs)
 	}
+	if override := strings.TrimSpace(os.Getenv(RepoCacheRootEnv)); override != "" {
+		add(override)
+	}
 	if gcHome := ImplicitGCHome(); gcHome != "" {
 		add(filepath.Join(gcHome, "cache", "repos"))
 	}

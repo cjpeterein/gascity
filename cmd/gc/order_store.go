@@ -536,6 +536,33 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 	return targets
 }
 
+// filterSuspendedRigSweepTargets drops rig sweep targets whose rig is
+// effectively suspended. City targets are always retained. Suspending a
+// rig should make its bead store cold: the controller's background order-
+// tracking sweep and retention watchdogs must not delete tracking beads
+// there, since each deletion commits to the suspended rig's Dolt database
+// (gastownhall/gascity gc-srxyo). The explicit `gc order sweep-tracking`
+// CLI path uses orderTrackingSweepStoresForConfigTargets directly and is
+// left unfiltered so an operator can still reclaim a suspended rig on demand.
+func filterSuspendedRigSweepTargets(targets []orderTrackingSweepTarget, cfg *config.City, cityPath string) []orderTrackingSweepTarget {
+	if cfg == nil || len(cfg.Rigs) == 0 {
+		return targets
+	}
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
+	suspended := buildEffectiveSuspendedRigNames(cfg, suspState)
+	if len(suspended) == 0 {
+		return targets
+	}
+	filtered := targets[:0]
+	for _, t := range targets {
+		if t.target.ScopeKind == "rig" && suspended[t.target.RigName] {
+			continue
+		}
+		filtered = append(filtered, t)
+	}
+	return filtered
+}
+
 func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City, requiredTargets map[string][]string) ([]beads.Store, error) {
 	targets := orderTrackingSweepTargetsForConfig(cityPath, cfg)
 	if len(requiredTargets) > 0 {

@@ -20,6 +20,13 @@ but is missing the noms/manifest file. When Dolt auto-discovers these dirs at
 startup, the broken noms store crashes INFORMATION_SCHEMA and can take down
 the entire server.
 
+An undersized-manifest database has a noms/manifest that exists but is far
+smaller than a real one (a genuine manifest is hundreds of bytes; leaked test
+fixtures have been as small as 3). These escape the missing-manifest check yet
+still crash enforceSingleFormat on the next restart, so they are treated as
+unservable. The byte threshold is GC_PHANTOM_MANIFEST_MIN_BYTES (default 32);
+set it to 0 to disable the size guard.
+
 A retired replacement database is a directory whose name ends with
 .replaced-YYYYMMDDTHHMMSSZ. Dolt can leave these behind with a valid manifest
 after a replacement operation fails to cleanly remove the old directory. They
@@ -47,8 +54,9 @@ This is infrastructure work. You:
 ## Safety
 
 Phantom database directories have NO valid data (missing noms/manifest).
+Undersized-manifest directories hold a manifest too small to be a real store.
 Retired replacement directories may contain recoverable data. Do not move,
-delete, or otherwise mutate either case. Escalate to an operator so cleanup
+delete, or otherwise mutate any case. Escalate to an operator so cleanup
 happens deliberately with the Dolt server stopped or through Dolt itself.
 
 Read each step's description before acting — Config values override defaults."""
@@ -76,6 +84,10 @@ A phantom database has:
 - A `.dolt/` subdirectory (looks like a database)
 - But NO `noms/manifest` file (broken/corrupted)
 
+An undersized-manifest database has:
+- A `.dolt/` subdirectory
+- A `noms/manifest` smaller than GC_PHANTOM_MANIFEST_MIN_BYTES (default 32)
+
 A retired replacement database has:
 - A `.dolt/` subdirectory
 - A basename matching `*.replaced-YYYYMMDDTHHMMSSZ`
@@ -84,6 +96,8 @@ A retired replacement database has:
 # For each dir in {{data_dir}}/:
 #   if <dir>/.dolt/ exists AND <dir>/.dolt/noms/manifest does NOT exist:
 #     -> phantom detected
+#   elif <dir>/.dolt/noms/manifest size < threshold (default 32 bytes):
+#     -> undersized manifest detected
 #   if basename matches *.replaced-[0-9]{8}T[0-9]{6}Z:
 #     -> retired replacement detected
 ```
@@ -91,6 +105,7 @@ A retired replacement database has:
 **3. Record findings:**
 - Total directories scanned
 - Phantom databases found (names and paths)
+- Undersized-manifest databases found (names and paths)
 - Retired replacement databases found (names and paths)
 - Valid databases found
 
@@ -125,10 +140,11 @@ This is required because:
 Unservable databases indicate a Dolt cleanup or data-dir hygiene issue that should be investigated.
 The exec order implementation in `assets/scripts/mol-dog-phantom-db.sh` sends the
 canonical escalation body; any formula-driven equivalent must include separate
-phantom and retired-replacement counts and state that no files were moved or deleted:
+phantom, undersized-manifest, and retired-replacement counts and state that no
+files were moved or deleted:
 ```bash
 gc mail send mayor/ -s "ESCALATION: Unservable Dolt databases detected [HIGH]" \\
-  -m "Found <count> unservable database directories: <names>. Phantoms: <count>; retired replacements: <count>. No files were moved or deleted."
+  -m "Found <count> unservable database directories: <names>. Phantoms: <count>; undersized manifests: <count>; retired replacements: <count>. No files were moved or deleted."
 ```
 
 **Exit criteria:** All unservable databases escalated (or none found)."""
@@ -142,13 +158,14 @@ Generate summary and signal completion.
 **1. Generate report summary:**
 - Directories scanned
 - Phantoms found
+- Undersized manifests found
 - Retired replacements found
 - Unservable databases escalated
 - Valid databases
 
 **2. Signal completion:**
 ```bash
-gc session nudge deacon/ "DOG_DONE: phantom-db — scanned: <count>, phantoms: <count>"
+gc session nudge deacon/ "DOG_DONE: phantom-db — scanned: <count>, phantoms: <count>, undersized: <count>"
 ```
 
 **3. Close work and exit:**

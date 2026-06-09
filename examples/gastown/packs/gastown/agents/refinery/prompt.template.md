@@ -162,10 +162,18 @@ without catching the mismatch (upstream #1833).
 # Step 0: Orphan-merge scan (mail-loss fallback).
 # Polecats sometimes die between commit and MERGE_READY mail
 # (e.g. controller restart, host wake, claim race). Their branch ships
-# but you never see the mail. Scan metadata for orphans before the
-# normal patrol — these are real merge candidates that need rescuing.
-ORPHANS=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --metadata-field gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery" --status=open --json 2>/dev/null \
-  | jq -r '.[] | select(.metadata.branch != null) | .id')
+# but you never see the mail. Scan for orphans before the normal patrol —
+# these are real merge candidates that need rescuing.
+#
+# Select by the SAME key the find-work step uses: assignee + branch
+# metadata. The polecat done-sequence sets `assignee=<rig>/refinery` and
+# `gc.routed_to=""` (cleared — routing is consumed once the bead lands on
+# the assignee), so a gc.routed_to scan would always return []. Aligning
+# the selectors guarantees the startup sweep sees the same stranded merge
+# work the formula's find-work query does.
+ORPHANS=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open \
+  --exclude-type=epic --has-metadata-key=branch --json 2>/dev/null \
+  | jq -r '.[].id')
 for ORPHAN in $ORPHANS; do
   echo "orphan-merge candidate: $ORPHAN"
   # Treat each like a normal mail-driven merge: read metadata, run gates,

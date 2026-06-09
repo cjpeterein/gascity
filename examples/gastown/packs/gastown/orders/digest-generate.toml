@@ -4,3 +4,11 @@ formula = "mol-digest-generate"
 trigger = "cooldown"
 interval = "24h"
 pool = "dog"
+# The digest is a single town-wide report covering all rigs, so it must
+# register exactly once regardless of how many rigs import this pack.
+# Without scope=city the order defaults to rig-scoped: it registers once
+# per importing rig (digest-generate, digest-generate:rig:gascity,
+# digest-generate:rig:beads, ...), each with an independent 24h cooldown
+# marker, so the same daily digest fires once per rig and the mayor
+# receives N duplicates per day (gc-ed6).
+scope = "city"

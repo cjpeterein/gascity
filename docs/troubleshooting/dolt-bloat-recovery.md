@@ -163,6 +163,17 @@ If GC finishes but the size barely moves, the chunks are nearly all live
   re-fetches and compares the remote head immediately before its force push.
   That check prevents known drift but cannot eliminate a remote write in the
   small fetch-to-push window.
+- **Let the dolt pack's `dolt-working-set-gc` order run continuously.**
+  `mol-dog-compactor` only acts once a database crosses the commit
+  threshold (`GC_DOLT_COMPACT_THRESHOLD_COMMITS`, default 2000), but the
+  working-set / NBS journal chunks that drive day-to-day bloat grow with
+  write *churn*, not commit-graph length. Databases that stay below the
+  threshold (commonly `gc`, `hq`, `pgp`) would otherwise never receive any
+  `DOLT_GC`. This order runs `gc dolt compact` hourly with
+  `GC_DOLT_COMPACT_BARE_GC=1`, which skips the threshold and the flatten
+  path and runs a bare `CALL DOLT_GC()` on every managed database. It does
+  not rewrite history or push to a remote; it only reclaims working-set
+  orphans between the 24h `mol-dog-compactor` flatten runs.
 - **Mind `orders.max_timeout` if you set one.** The compactor order asks
   for a 24-hour timeout to accommodate serialized full-GC runs on large
   stores. A city-level `orders.max_timeout` below 24h will cap the

@@ -169,6 +169,46 @@ beadID)`. The default sling queries (`EffectiveSlingQuery()` in
 Fixed agents claim by assignee. Pool agents claim by label -- any member
 matching `pool:<name>` can pick it up.
 
+Built-in pool routing also stamps `gc.routed_to` on the bead
+(`cliBeadRouter.Route` in `cmd/gc/cmd_sling.go`) via `Store.SetMetadata`.
+`gc.routed_to` is the sole canonical persisted routing key the worker
+claim path and the controller's pool-demand scale_check read (the legacy
+`gc.run_target` wire field is deprecated; see `fixes #2763`). A
+slung-but-unclaimed bead therefore relies entirely on `gc.routed_to`
+surviving until a pool member claims it.
+
+#### Routing metadata vs. the bead cache (gc-gi24h)
+
+The controller observes routing writes from other processes (the CLI
+`gc sling`) through the bead cache (`internal/beads/CachingStore`), not by
+re-reading the store on every scale_check. A `gc sling` in another process
+stamps `gc.routed_to` and the bd `on_update` hook forwards a
+`bead.updated` event carrying the full issue JSON (including `updated_at`)
+to the controller, which applies it via `CachingStore.ApplyEvent`.
+
+This is a *remote* mutation, so it is not protected by the cache's
+recent-local-write guard. The exposure: the periodic full-scan reconcile
+(`runReconciliation`) reads the backing store, and a lagging JSONL mirror
+or an older Dolt revision can return a *stale pre-sling snapshot* of the
+bead — still open, still carrying no `gc.routed_to`. Without a guard the
+reconcile diff overwrites the fresher cached routed row with the stale
+one, silently clearing `gc.routed_to`. The bead then appears in
+`bd ready` as ordinary ready work with empty routing metadata, so the
+scale_check sees no routed-but-unassigned demand and never re-arms the
+pool: workless work hides as ready work and throughput silently stops.
+A *claimed* bead is immune because its claim is a local mutation the
+recent-local-write guard preserves; only the unclaimed, remote-event-learned
+row is exposed.
+
+`reconcileBackingStale` (added for the sibling resurrection bug gc-62iua)
+closes this: `updated_at` is stamped on every write and advances
+monotonically across all store implementations, so a cached row with a
+strictly newer `updated_at` is authoritative and the stale scan row is
+skipped. The slung row's timestamp is newer than the pre-sling scan row,
+so `gc.routed_to` survives. Regression coverage:
+`TestCachingStoreReconciliationPreservesRoutedToFromStaleList` in
+`internal/beads/caching_store_reconcile_internal_test.go`.
+
 ### The claiming act
 
 For pool agents, claiming happens at the prompt level. The agent runs

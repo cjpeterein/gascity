@@ -6301,6 +6301,129 @@ func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
 	}
 }
 
+func TestOrderTrackingRetentionWatchdog_SkipsSuspendedRig(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// Both stores hold the same prunable backlog (8d old, beyond the
+	// retain floor). Only the active rig's beads should be deleted; the
+	// suspended rig's store must not receive any writes.
+	seedBacklog := func(prefix string) []beads.Bead {
+		seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+2)
+		for i := range minClosedOrderTrackingRetained + 2 {
+			seed = append(seed, beads.Bead{
+				ID:        fmt.Sprintf("%s-%02d", prefix, i),
+				Title:     "order:mol-dog-reaper:rig:" + prefix,
+				Status:    "closed",
+				Type:      "task",
+				CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+				Labels:    []string{"order-run:mol-dog-reaper:rig:" + prefix, labelOrderTracking},
+				Ephemeral: true,
+			})
+		}
+		return seed
+	}
+	activeStore := beads.NewMemStoreFrom(100, seedBacklog("active"), nil)
+	suspendedStore := beads.NewMemStoreFrom(100, seedBacklog("suspended"), nil)
+
+	cityPath := t.TempDir()
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{Name: "active", Path: filepath.Join(cityPath, "active")},
+				{Name: "suspended", Path: filepath.Join(cityPath, "suspended"), SuspendedOnStart: true},
+			},
+		},
+		standaloneCityStore: beads.NewMemStore(),
+		standaloneRigStores: map[string]beads.Store{
+			"active":    activeStore,
+			"suspended": suspendedStore,
+		},
+		stdout:    io.Discard,
+		stderr:    io.Discard,
+		logPrefix: "gc test",
+	}
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	// Active rig: 2 oldest pruned.
+	for _, id := range []string{"active-00", "active-01"} {
+		if _, err := activeStore.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("active Get(%s) err = %v, want ErrNotFound (should be pruned)", id, err)
+		}
+	}
+	// Suspended rig: nothing deleted — its DB must stay cold.
+	for i := range minClosedOrderTrackingRetained + 2 {
+		id := fmt.Sprintf("suspended-%02d", i)
+		if _, err := suspendedStore.Get(id); err != nil {
+			t.Fatalf("suspended Get(%s) err = %v, want preserved (suspended rig must not be swept)", id, err)
+		}
+	}
+}
+
+func TestOrderTrackingSweepWatchdog_SkipsSuspendedRig(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	activeStore := beads.NewMemStore()
+	suspendedStore := beads.NewMemStore()
+
+	activeTracking, err := activeStore.Create(beads.Bead{
+		Title:     "order:mol-dog-reaper:rig:active",
+		Labels:    []string{"order-run:mol-dog-reaper:rig:active", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(active tracking): %v", err)
+	}
+	suspendedTracking, err := suspendedStore.Create(beads.Bead{
+		Title:     "order:mol-dog-reaper:rig:suspended",
+		Labels:    []string{"order-run:mol-dog-reaper:rig:suspended", labelOrderTracking},
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create(suspended tracking): %v", err)
+	}
+
+	cityPath := t.TempDir()
+	cr := &CityRuntime{
+		cityPath: cityPath,
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs: []config.Rig{
+				{Name: "active", Path: filepath.Join(cityPath, "active")},
+				{Name: "suspended", Path: filepath.Join(cityPath, "suspended"), SuspendedOnStart: true},
+			},
+		},
+		standaloneCityStore: cityStore,
+		standaloneRigStores: map[string]beads.Store{
+			"active":    activeStore,
+			"suspended": suspendedStore,
+		},
+		stdout:    io.Discard,
+		stderr:    io.Discard,
+		logPrefix: "gc test",
+	}
+	staleAt := activeTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond)
+	cr.runOrderTrackingSweepWatchdog(staleAt)
+
+	// Active rig's stale tracking closed.
+	gotActive, err := activeStore.Get(activeTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(active tracking): %v", err)
+	}
+	if gotActive.Status != "closed" {
+		t.Fatalf("active tracking status = %s, want closed", gotActive.Status)
+	}
+	// Suspended rig's tracking untouched — its DB must stay cold.
+	gotSuspended, err := suspendedStore.Get(suspendedTracking.ID)
+	if err != nil {
+		t.Fatalf("Get(suspended tracking): %v", err)
+	}
+	if gotSuspended.Status != "open" {
+		t.Fatalf("suspended tracking status = %s, want open (suspended rig must not be swept)", gotSuspended.Status)
+	}
+}
+
 func TestWarnIfClosedOrderTrackingBacklogLarge_SilentAtThreshold(t *testing.T) {
 	// 100 closed beads: at the threshold, no warning (fires only when > 100).
 	seed := make([]beads.Bead, 100)

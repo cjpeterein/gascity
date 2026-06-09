@@ -442,6 +442,7 @@ trigger = "manual"
 func TestV2LegacyOrderLayoutReportsRemoteImportedPackEvaluatedByLoader(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	isolateRepoCacheRoot(t)
 
 	cityDir := t.TempDir()
 	source := "https://github.com/example/orders-pack.git"
@@ -461,7 +462,11 @@ trigger = "manual"
 	mustGitImport(t, repoDir, "commit", "-m", "initial")
 	commit := gitOutputImport(t, repoDir, "rev-parse", "HEAD")
 
-	cacheDir := filepath.Join(homeDir, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
+	cacheRoot, err := config.RepoCacheRoot()
+	if err != nil {
+		t.Fatalf("RepoCacheRoot: %v", err)
+	}
+	cacheDir := filepath.Join(cacheRoot, config.RepoCacheKey(source, commit))
 	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
 		t.Fatal(err)
 	}

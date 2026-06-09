@@ -89,6 +89,41 @@ func clearProcessLiveEnvForTests() {
 	}
 }
 
+// isolateRepoCacheRoot points the machine-local repo cache at a fresh per-test
+// directory via GC_REPO_CACHE_ROOT. The package TestMain sets a single GC_HOME
+// for the whole process, so any test that stages or materializes a repo cache
+// must isolate its own root or it will collide with concurrent tests staging
+// the same source+commit (identical content yields an identical cache key). It
+// also guarantees no test stamps the shared synthetic-pack marker into the live
+// ~/.gc/cache/repos (gc-c7l). Resolve the active root with config.RepoCacheRoot.
+func isolateRepoCacheRoot(t *testing.T) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "repo-cache")
+	t.Setenv(config.RepoCacheRootEnv, root)
+}
+
+// TestRepoCacheRootNeverResolvesToRealUserHome is the gc-c7l regression guard.
+// The package TestMain isolates GC_HOME to a temp dir; config.RepoCacheRoot
+// must therefore resolve the machine-local cache under that isolated GC_HOME
+// (or an explicit GC_REPO_CACHE_ROOT), never under the real OS user home. If
+// this fails, a `go test ./cmd/gc/...` run can stamp the shared synthetic-pack
+// marker into the live ~/.gc/cache/repos and brick the running city.
+func TestRepoCacheRootNeverResolvesToRealUserHome(t *testing.T) {
+	realHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("UserHomeDir: %v", err)
+	}
+	liveCache := filepath.Join(realHome, ".gc", "cache", "repos")
+
+	root, err := config.RepoCacheRoot()
+	if err != nil {
+		t.Fatalf("RepoCacheRoot: %v", err)
+	}
+	if root == liveCache {
+		t.Fatalf("RepoCacheRoot resolved to the live shared cache %q; the test harness must isolate it via GC_HOME or GC_REPO_CACHE_ROOT", liveCache)
+	}
+}
+
 func TestClearProcessLiveEnvForTestsUnsetsInheritedState(t *testing.T) {
 	cleared := []string{
 		"BEADS_ACTOR",

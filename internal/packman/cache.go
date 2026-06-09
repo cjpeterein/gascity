@@ -20,12 +20,11 @@ var (
 )
 
 // RepoCacheRoot returns the shared machine-local repo cache root.
+// Delegates to config.RepoCacheRoot so the loader (read/validate path) and
+// packman (write path) always agree on where the cache lives, including the
+// GC_REPO_CACHE_ROOT isolation override.
 func RepoCacheRoot() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolving home dir: %w", err)
-	}
-	return filepath.Join(home, ".gc", "cache", "repos"), nil
+	return config.RepoCacheRoot()
 }
 
 // RepoCacheKey returns the canonical source+commit cache key.

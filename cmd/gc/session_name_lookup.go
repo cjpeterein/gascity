@@ -187,7 +187,17 @@ func createPoolSessionBeadWithAlias(
 	explicitID := poolSessionExplicitBeadID(store, instanceToken)
 	sessionName := pendingPoolSessionName(template, instanceToken)
 	if explicitID != "" {
-		sessionName = PoolSessionName(template, explicitID)
+		// Seed the create with the same value derivePoolSessionName would
+		// produce in the no-alias case so the explicit-ID create bakes the
+		// final session_name and no post-create update is needed. The
+		// instance form (PoolSessionNameForInstance) surfaces the rig prefix
+		// for pool workers; PoolSessionName is the fallback when no qualified
+		// instance is known.
+		if instanceName := PoolSessionNameForInstance(agentName, explicitID); instanceName != "" {
+			sessionName = instanceName
+		} else {
+			sessionName = PoolSessionName(template, explicitID)
+		}
 	}
 	meta := map[string]string{
 		"template":                  template,
@@ -220,10 +230,6 @@ func createPoolSessionBeadWithAlias(
 	}
 	sessionName, err = derivePoolSessionName(store, cfg, template, agentName, bead.ID, resolvedTmuxAlias, sessionBeads)
 	if err != nil {
-		_ = store.Close(bead.ID)
-		return beads.Bead{}, err
-	}
-	if err := store.SetMetadata(bead.ID, "session_name", sessionName); err != nil {
 		_ = store.Close(bead.ID)
 		return beads.Bead{}, err
 	}

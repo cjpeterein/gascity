@@ -66,3 +66,13 @@ overlay
 -- legacy-city/namepools/mayor.txt --
 Ada
 Grace
+
+-- packs/gastown/pack.toml --
+[pack]
+name = "gastown"
+schema = 2
+
+-- packs/default rig/pack.toml --
+[pack]
+name = "default-rig"
+schema = 2

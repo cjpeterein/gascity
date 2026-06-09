@@ -552,6 +552,89 @@ func TestCachingStoreReconciliationDoesNotResurrectClosedBeadFromStaleList(t *te
 	}
 }
 
+// TestCachingStoreReconciliationPreservesRoutedToFromStaleList reproduces
+// gc-gi24h: gc sling stamps gc.routed_to on an unclaimed open work bead in
+// another process. This process's controller learns the routed value via a
+// REMOTE bead.updated event (not a local write, so the recent-local-mutation
+// guard does not protect it). A later runReconciliation full scan returns a
+// STALE pre-sling snapshot — a lagging JSONL mirror or an older Dolt revision
+// — carrying an older updated_at and no gc.routed_to. Without
+// reconcileBackingStale the diff overwrites the fresher cached routed row with
+// the stale one, silently clearing gc.routed_to: the bead then shows as ready
+// work with empty routing metadata, so the controller's scale_check sees no
+// routed-but-unassigned demand and never re-arms the pool — the bug's observed
+// symptom (workless work hiding as ready work). updated_at is the
+// discriminator: the slung row's timestamp is strictly newer than the stale
+// scan row, so the cached row wins. A claimed bead retains its metadata for the
+// same reason its assignment is a local mutation; only the unclaimed,
+// remote-event-learned row is exposed to this race.
+func TestCachingStoreReconciliationPreservesRoutedToFromStaleList(t *testing.T) {
+	mem := NewMemStore()
+	bead, err := mem.Create(Bead{Title: "route me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	stalePreSling := cloneBead(bead) // no routed_to, original (older) updated_at
+
+	backing := &reconcileRaceStore{
+		Store:   mem,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		stale:   []Bead{stalePreSling},
+	}
+	cs := NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// Another process (gc sling) stamps gc.routed_to in the backing, advancing
+	// updated_at. This process does not see it as a local write.
+	if err := mem.SetMetadata(bead.ID, "gc.routed_to", "rig/polecat"); err != nil {
+		t.Fatalf("backing SetMetadata: %v", err)
+	}
+	routed, err := mem.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get routed: %v", err)
+	}
+	if !routed.UpdatedAt.After(stalePreSling.UpdatedAt) {
+		t.Fatalf("sling did not advance updated_at: routed=%s stale=%s", routed.UpdatedAt, stalePreSling.UpdatedAt)
+	}
+	// The bd on_update hook forwards the full issue JSON, which carries
+	// updated_at, wrapped in a {"bead": ...} envelope.
+	payload, err := json.Marshal(map[string]any{"bead": routed})
+	if err != nil {
+		t.Fatalf("Marshal event: %v", err)
+	}
+	cs.ApplyEvent("bead.updated", payload)
+
+	if got, err := cs.Get(bead.ID); err != nil {
+		t.Fatalf("Get after event: %v", err)
+	} else if got.Metadata["gc.routed_to"] != "rig/polecat" {
+		t.Fatalf("precondition: cache missing routed_to after remote event: %v", got.Metadata)
+	}
+
+	// Reconcile against the stale pre-sling snapshot.
+	backing.mu.Lock()
+	backing.block = true
+	backing.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		cs.runReconciliation()
+		close(done)
+	}()
+	<-backing.started
+	close(backing.release)
+	<-done
+
+	got, err := cs.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.Metadata["gc.routed_to"] != "rig/polecat" {
+		t.Fatalf("gc.routed_to cleared by stale reconcile: metadata=%v", got.Metadata)
+	}
+}
+
 // TestCachingStoreClosedEventStampsUpdatedAt reproduces the second half of
 // gc-62iua: a rich bead.closed event carrying a fresh updated_at must update
 // the cached row's UpdatedAt so the cache's own timestamp is authoritative.

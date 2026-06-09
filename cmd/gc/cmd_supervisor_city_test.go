@@ -501,11 +501,18 @@ version = "` + config.PublicGastownPackVersion + `"
 	return cityPath
 }
 
-func assertPublicGastownSyntheticCache(t *testing.T, gcHome string) {
+func assertPublicGastownSyntheticCache(t *testing.T) {
 	t.Helper()
 
+	// Hydration writes through config.RepoCacheRoot (the SSOT, which honors
+	// GC_REPO_CACHE_ROOT and GC_HOME), so resolve the root the same way
+	// instead of hardcoding $HOME/.gc/cache/repos.
+	root, err := config.RepoCacheRoot()
+	if err != nil {
+		t.Fatalf("RepoCacheRoot: %v", err)
+	}
 	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
-	cacheDir := filepath.Join(gcHome, "cache", "repos", packman.RepoCacheKey(config.PublicGastownPackSource, commit), "gastown")
+	cacheDir := filepath.Join(root, packman.RepoCacheKey(config.PublicGastownPackSource, commit), "gastown")
 	if _, err := os.Stat(filepath.Join(cacheDir, "pack.toml")); err != nil {
 		t.Fatalf("expected public gastown synthetic cache at %s: %v", cacheDir, err)
 	}
@@ -524,7 +531,7 @@ func TestEffectiveCityNameHydratesLockedImportCacheBeforeLoad(t *testing.T) {
 	if name != "bright-lights" {
 		t.Fatalf("effectiveCityName = %q, want %q", name, "bright-lights")
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCache(t)
 }
 
 func TestLoadSupervisorCityConfigHydratesLockedImportCacheBeforeLoad(t *testing.T) {
@@ -540,7 +547,7 @@ func TestLoadSupervisorCityConfigHydratesLockedImportCacheBeforeLoad(t *testing.
 	if cfg.Workspace.Name != "bright-lights" {
 		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCache(t)
 }
 
 func TestLoadStartCityConfigInstallsLockedBundledRemoteImportBeforeLoad(t *testing.T) {
@@ -556,7 +563,7 @@ func TestLoadStartCityConfigInstallsLockedBundledRemoteImportBeforeLoad(t *testi
 	if cfg.Workspace.Name != "bright-lights" {
 		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCache(t)
 }
 
 func TestLoadCityConfigInstallsLockedBundledRemoteImportBeforeLoad(t *testing.T) {
@@ -572,7 +579,7 @@ func TestLoadCityConfigInstallsLockedBundledRemoteImportBeforeLoad(t *testing.T)
 	if cfg.Workspace.Name != "bright-lights" {
 		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCache(t)
 }
 
 func TestLoadStartCityConfigBuiltinGastownMayorHasNoStartupNudge(t *testing.T) {
@@ -624,7 +631,7 @@ func TestLoadSlingCityConfigHydratesLockedImportCacheBeforeLoad(t *testing.T) {
 	if cfg.Workspace.Name != "bright-lights" {
 		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCache(t)
 }
 
 func TestLoadConfigCommandCityConfigHydratesLockedImportCacheBeforeLoad(t *testing.T) {
@@ -640,7 +647,7 @@ func TestLoadConfigCommandCityConfigHydratesLockedImportCacheBeforeLoad(t *testi
 	if cfg.Workspace.Name != "bright-lights" {
 		t.Fatalf("workspace name = %q, want %q", cfg.Workspace.Name, "bright-lights")
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCache(t)
 }
 
 func TestRegisterCityWithSupervisorInstallsLockedBundledRemoteImportBeforeNameLoad(t *testing.T) {
@@ -664,7 +671,7 @@ func TestRegisterCityWithSupervisorInstallsLockedBundledRemoteImportBeforeNameLo
 	if code != 0 {
 		t.Fatalf("registerCityWithSupervisor code = %d, want 0: %s", code, stderr.String())
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCache(t)
 }
 
 func TestRegisterCityWithSupervisorNameOverrideHydratesLockedImportCache(t *testing.T) {
@@ -688,7 +695,7 @@ func TestRegisterCityWithSupervisorNameOverrideHydratesLockedImportCache(t *test
 	if code != 0 {
 		t.Fatalf("registerCityWithSupervisorNamed code = %d, want 0: %s", code, stderr.String())
 	}
-	assertPublicGastownSyntheticCache(t, gcHome)
+	assertPublicGastownSyntheticCache(t)
 }
 
 func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {

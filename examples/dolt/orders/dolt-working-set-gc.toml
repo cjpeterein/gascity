@@ -1,0 +1,29 @@
+# Periodic working-set GC for managed Dolt databases.
+#
+# Why this exists: `gc dolt compact` (mol-dog-compactor) only acts once a
+# database crosses GC_DOLT_COMPACT_THRESHOLD_COMMITS (default 2000). The cost
+# this reclaims — working-set / NBS journal range-index chunks — grows with
+# write *churn*, not commit-graph length, so databases that stay below the
+# threshold (gc, hq, pgp on a typical city) never receive any DOLT_GC and bloat
+# unbounded (gascityhall/gascity#2615, gc-59o). PR #1196 measured an
+# unconditional hourly CALL DOLT_GC() as both necessary (Dolt auto-GC does not
+# fire under bd's fork-per-op workload) and cheap (~43% reclaimed in 4.6s on a
+# 148 MB store). PR #1918 removed the dolt-gc-nudge order that did this on the
+# assumption compaction covered it; it does not for below-threshold databases.
+# PR #2687 added the bare-GC mode below but explicitly deferred the scheduling.
+#
+# GC_DOLT_COMPACT_BARE_GC=1 makes `gc dolt compact` skip the commit-count
+# threshold and the flatten/full-GC path, running a bare CALL DOLT_GC() on each
+# discovered database. No history rewrite, no remote push, no flatten-
+# remediation markers — just the working-set reclaim. The integrity quarantine
+# marker is still honored. The hourly cadence keeps working-set orphans bounded
+# between the 24h flatten runs (mol-dog-compactor).
+[order]
+description = "Periodic working-set CALL DOLT_GC() decoupled from the commit-count flatten threshold"
+trigger = "cooldown"
+interval = "1h"
+exec = "gc dolt compact"
+timeout = "24h"
+
+[order.env]
+GC_DOLT_COMPACT_BARE_GC = "1"

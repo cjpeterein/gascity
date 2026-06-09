@@ -9551,3 +9551,206 @@ func TestCarryLastRunCacheFrom(t *testing.T) {
 		t.Errorf("cache size = %d after no-op carries, want 2", len(next.lastRunCache))
 	}
 }
+
+// gateSkipTestOrder is the order name used by the gate-skip log tests and the
+// dispatcher they build; centralized so the seeded tracking beads and the
+// configured order always agree.
+const gateSkipTestOrder = "wisp-compact"
+
+// seedOpenOrderTrackingBead inserts an open order-tracking bead for
+// gateSkipTestOrder so the dispatcher's hasOpenTracking gate trips on the next
+// dispatch. This is the same shape the dispatcher itself writes (Title
+// "order:<scoped>", label "order-run:<scoped>" plus labelOrderTracking) and the
+// shape runOrderTrackingSweepWatchdog normally cleans within 2m. Tests use it
+// to reproduce the pre-#2619 jam where a non-sweep order's tracking was never
+// swept and the gate held silently.
+func seedOpenOrderTrackingBead(t *testing.T, store beads.Store) {
+	t.Helper()
+	scoped := gateSkipTestOrder
+	if _, err := store.Create(beads.Bead{
+		Title:     "order:" + scoped,
+		Labels:    []string{"order-run:" + scoped, labelOrderTracking},
+		Ephemeral: true,
+	}); err != nil {
+		t.Fatalf("seed open tracking bead for %q: %v", scoped, err)
+	}
+}
+
+func newGateSkipTestDispatcher(store beads.Store, stderr io.Writer, calls *int) *memoryOrderDispatcher {
+	execRun := func(context.Context, string, string, []string) ([]byte, error) {
+		if calls != nil {
+			*calls++
+		}
+		return []byte("ok"), nil
+	}
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
+	return &memoryOrderDispatcher{
+		aa: []orders.Order{{
+			Name:    gateSkipTestOrder,
+			Trigger: "cooldown",
+			// Short interval so the cooldown is Due whenever the gate is
+			// clear; these tests exercise the gate-skip log, not cooldown
+			// timing, and keep all ticks inside orderGateSkipLogInterval.
+			Interval: "1ms",
+			Exec:     "scripts/wisp-compact.sh",
+		}},
+		storeFn: func(_ execStoreTarget) (beads.Store, error) {
+			return store, nil
+		},
+		execRun:              execRun,
+		rec:                  events.Discard,
+		stderr:               stderr,
+		maxDispatchesPerTick: defaultMaxOrderDispatchesPerTick,
+		cfg:                  &config.City{},
+		dispatchCtx:          dispatchCtx,
+		dispatchCancel:       dispatchCancel,
+	}
+}
+
+// TestDispatchLogsOpenTrackingGateSkip is the gc-vzly9 regression guard. A
+// silent open-tracking gate skip is exactly why the 2026-05-20 9h dispatch gap
+// needed 3-week-later forensics instead of being readable from controller
+// stderr. When an order is suppressed because a prior tracking bead is still
+// open, the dispatcher must log it, naming the order and the gate.
+func TestDispatchLogsOpenTrackingGateSkip(t *testing.T) {
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+	var calls int
+	m := newGateSkipTestDispatcher(store, &stderr, &calls)
+	seedOpenOrderTrackingBead(t, store)
+
+	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	m.drain(context.Background())
+
+	if calls != 0 {
+		t.Fatalf("exec calls = %d, want 0 (gate should suppress dispatch)", calls)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "wisp-compact") {
+		t.Fatalf("stderr = %q, want it to name the gated order", out)
+	}
+	if !strings.Contains(out, "open-tracking") {
+		t.Fatalf("stderr = %q, want it to name the open-tracking gate", out)
+	}
+}
+
+// TestDispatchLogsOpenWorkGateSkip covers the second skip site: an open wisp
+// root with open child step beads (no tracking label) clears the open-tracking
+// gate but trips the open-work gate (the tr-kds01 shape). The skip must be
+// logged naming the open-work gate.
+func TestDispatchLogsOpenWorkGateSkip(t *testing.T) {
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+	var calls int
+	m := newGateSkipTestDispatcher(store, &stderr, &calls)
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-wisp-compact",
+		Type:   "molecule",
+		Labels: []string{"order-run:wisp-compact"},
+	})
+	if err != nil {
+		t.Fatalf("seed wisp root: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:    "do-compaction",
+		ParentID: wispRoot.ID,
+	}); err != nil {
+		t.Fatalf("seed open child: %v", err)
+	}
+
+	// Dispatch well after the seeded beads so the cooldown is unambiguously
+	// Due (the cooldown check runs before the open-work gate); the open child
+	// then trips the open-work gate.
+	m.dispatch(context.Background(), t.TempDir(), time.Now().Add(time.Hour))
+	m.drain(context.Background())
+
+	if calls != 0 {
+		t.Fatalf("exec calls = %d, want 0 (open-work gate should suppress dispatch)", calls)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "open-work") {
+		t.Fatalf("stderr = %q, want it to name the open-work gate", out)
+	}
+	if !strings.Contains(out, "wisp-compact") {
+		t.Fatalf("stderr = %q, want it to name the gated order", out)
+	}
+}
+
+// TestDispatchOpenTrackingGateSkipLogThrottled verifies the gate-skip log is
+// throttled: these gates evaluate every tick for every order, so an unthrottled
+// log would flood stderr. The line appears once within the throttle interval
+// and again once the interval elapses.
+func TestDispatchOpenTrackingGateSkipLogThrottled(t *testing.T) {
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+	m := newGateSkipTestDispatcher(store, &stderr, nil)
+	seedOpenOrderTrackingBead(t, store)
+
+	base := time.Now()
+	m.dispatch(context.Background(), t.TempDir(), base)
+	m.drain(context.Background())
+	m.dispatch(context.Background(), t.TempDir(), base.Add(orderGateSkipLogInterval/2))
+	m.drain(context.Background())
+
+	if got := strings.Count(stderr.String(), "open-tracking"); got != 1 {
+		t.Fatalf("open-tracking log count within interval = %d, want 1 (throttled)", got)
+	}
+
+	m.dispatch(context.Background(), t.TempDir(), base.Add(orderGateSkipLogInterval+time.Second))
+	m.drain(context.Background())
+
+	if got := strings.Count(stderr.String(), "open-tracking"); got != 2 {
+		t.Fatalf("open-tracking log count after interval elapsed = %d, want 2 (re-logged)", got)
+	}
+}
+
+// TestDispatchGateSkipLogResetsAfterDispatch verifies the throttle resets once
+// an order successfully dispatches: a recovered-then-jammed order must log
+// again rather than staying silent for the rest of the interval window.
+func TestDispatchGateSkipLogResetsAfterDispatch(t *testing.T) {
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+	var calls int
+	m := newGateSkipTestDispatcher(store, &stderr, &calls)
+
+	// Tick 1: gated by a seeded open tracking bead -> logs once.
+	seedOpenOrderTrackingBead(t, store)
+	base := time.Now()
+	m.dispatch(context.Background(), t.TempDir(), base)
+	m.drain(context.Background())
+	if got := strings.Count(stderr.String(), "open-tracking"); got != 1 {
+		t.Fatalf("open-tracking log count after first gated tick = %d, want 1", got)
+	}
+
+	// Close the seeded tracking bead so the gate clears, then tick 2 within the
+	// throttle interval: the order dispatches (exec runs), clearing the throttle.
+	closeAllOpenTracking(t, store)
+	m.dispatch(context.Background(), t.TempDir(), base.Add(time.Minute))
+	m.drain(context.Background())
+	if calls != 1 {
+		t.Fatalf("exec calls after gate cleared = %d, want 1", calls)
+	}
+
+	// Re-seed an open tracking bead and tick 3, still within the original
+	// interval: because the successful dispatch reset the throttle, this logs
+	// again instead of staying silent.
+	seedOpenOrderTrackingBead(t, store)
+	m.dispatch(context.Background(), t.TempDir(), base.Add(2*time.Minute))
+	m.drain(context.Background())
+	if got := strings.Count(stderr.String(), "open-tracking"); got != 2 {
+		t.Fatalf("open-tracking log count after dispatch reset throttle = %d, want 2", got)
+	}
+}
+
+func closeAllOpenTracking(t *testing.T, store beads.Store) {
+	t.Helper()
+	for _, b := range trackingBeads(t, store, "order-run:"+gateSkipTestOrder) {
+		if b.Status == "closed" {
+			continue
+		}
+		if err := store.Close(b.ID); err != nil {
+			t.Fatalf("close tracking bead %s: %v", b.ID, err)
+		}
+	}
+}

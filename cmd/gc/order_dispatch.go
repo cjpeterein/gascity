@@ -77,6 +77,16 @@ const (
 	defaultMaxOrderDispatchesPerTick = 4
 	orderTrackingSweepCloseBudget    = 4
 
+	// orderGateSkipLogInterval throttles the per-order diagnostic logged when
+	// an open-tracking or open-work gate suppresses dispatch. The gates are
+	// re-evaluated every tick for every order, so logging on each skip would
+	// flood stderr; a dispatch jam is characterized by persistence, so one
+	// line when an order first stalls plus a heartbeat every interval while it
+	// stays stalled is enough to surface it. Closes the gc-vzly9
+	// observability gap: pre-#2619 a non-sweep order's tracking was never
+	// swept and the gate held silently for ~9h, requiring later forensics.
+	orderGateSkipLogInterval = 5 * time.Minute
+
 	// orderTrackingRetentionWatchdogInterval is the minimum time between
 	// controller-driven closed-bead retention sweeps. 15 minutes balances
 	// effective cleanup against per-tick overhead.
@@ -284,6 +294,11 @@ type memoryOrderDispatcher struct {
 	cityPath             string
 	cacheMu              sync.Mutex
 	lastRunCache         map[string]time.Time
+	// gateSkipLogged tracks, per scoped order name, the tick time of the last
+	// emitted gate-skip diagnostic. Used to throttle the log to at most once
+	// per orderGateSkipLogInterval and reset on successful dispatch. Guarded
+	// by cacheMu.
+	gateSkipLogged map[string]time.Time
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -308,7 +323,13 @@ type orderDispatchTrackingIndex struct {
 
 type orderTrackingSummary struct {
 	openTracking bool
-	lastRun      time.Time
+	// openNonEnvFailedTracking is true when at least one open tracking bead
+	// for the order is NOT the trigger-env-failed marker. The env-failed
+	// marker is a deliberate suppression sentinel that already emits its own
+	// OrderFailed event, so the dispatch gate-skip diagnostic must not treat
+	// it as a silent stall (gc-vzly9).
+	openNonEnvFailedTracking bool
+	lastRun                  time.Time
 }
 
 // buildOrderDispatcher scans formula layers for orders and returns a
@@ -517,6 +538,13 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 		}
 		if hasOpenTracking {
+			// The trigger-env-failed marker is a deliberate suppression
+			// sentinel that already emits its own OrderFailed event; only a
+			// genuine in-flight tracking bead is the silent-stall case the
+			// gate-skip diagnostic exists to surface (gc-vzly9).
+			if trackingIndex.hasOpenNonEnvFailedTracking(storesForGate, storeKeysForGate, scoped) {
+				m.logGatedSkip(now, scoped, "open-tracking")
+			}
 			continue
 		}
 
@@ -610,6 +638,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 		}
 		if hasOpenWork {
+			m.logGatedSkip(now, scoped, "open-work")
 			continue
 		}
 
@@ -625,6 +654,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 		m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
+		// Order dispatched: reset its gate-skip throttle so a future stall
+		// logs immediately rather than within the prior interval's shadow.
+		m.clearGateSkipLog(scoped)
 
 		// Fire with timeout; inflight tracks the spawned goroutine so
 		// drain can wait for tracking-bead outcome persistence before
@@ -753,6 +785,33 @@ func (idx *orderDispatchTrackingIndex) hasOpenTracking(
 		}
 	}
 	return false, nil
+}
+
+// hasOpenNonEnvFailedTracking reports whether the open-tracking suppression for
+// scopedName is genuine in-flight tracking rather than only the deliberate
+// trigger-env-failed marker. Used to decide whether the gate-skip diagnostic
+// should fire; the env-failed marker already emits its own OrderFailed event.
+func (idx *orderDispatchTrackingIndex) hasOpenNonEnvFailedTracking(
+	stores []beads.Store,
+	storeKeys []string,
+	scopedName string,
+) bool {
+	if idx == nil {
+		return false
+	}
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		entries, err := idx.entriesForStore(store, indexStoreKey(storeKeys, i))
+		if err != nil {
+			return false
+		}
+		if entries[scopedName].openNonEnvFailedTracking {
+			return true
+		}
+	}
+	return false
 }
 
 func (idx *orderDispatchTrackingIndex) hasOpenWork(
@@ -910,6 +969,9 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 		summary := entries[scopedName]
 		if item.Status != "closed" {
 			summary.openTracking = true
+			if !beadLabelsContain(item.Labels, labelTriggerEnvFailed) {
+				summary.openNonEnvFailedTracking = true
+			}
 		}
 		entries[scopedName] = summary
 	}
@@ -1006,6 +1068,44 @@ func (m *memoryOrderDispatcher) carryLastRunCacheFrom(prev *memoryOrderDispatche
 
 func orderHistoryCacheKey(orderName string, storeKeys []string) string {
 	return orderName + "\x00" + strings.Join(storeKeys, "\x00")
+}
+
+// logGatedSkip emits a throttled diagnostic when a dispatch gate suppresses an
+// order. gate names the suppressing gate ("open-tracking" or "open-work") so
+// the two skip sites are distinguishable in logs. It logs at most once per
+// orderGateSkipLogInterval per scoped order; now is the current tick time.
+// Without this, a persistently gated order halts silently (gc-vzly9).
+func (m *memoryOrderDispatcher) logGatedSkip(now time.Time, scoped, gate string) {
+	m.cacheMu.Lock()
+	if m.gateSkipLogged == nil {
+		m.gateSkipLogged = make(map[string]time.Time)
+	}
+	last, ok := m.gateSkipLogged[scoped]
+	if ok && !last.IsZero() && now.Sub(last) < orderGateSkipLogInterval {
+		m.cacheMu.Unlock()
+		return
+	}
+	m.gateSkipLogged[scoped] = now
+	m.cacheMu.Unlock()
+	var hint string
+	switch gate {
+	case "open-tracking":
+		hint = fmt.Sprintf("a prior tracking bead is still open; the order-tracking sweep watchdog clears stale tracking older than %s", orderTrackingSweepWatchdogStaleAfter)
+	case "open-work":
+		hint = "a prior run's wisp subtree still has open work; it clears when that work closes or via 'gc order sweep-tracking --include-wisps'"
+	default:
+		hint = "a prior run is still open"
+	}
+	logDispatchError(m.stderr, "gc: order dispatch: %s suppressed by %s gate (%s)", scoped, gate, hint)
+}
+
+// clearGateSkipLog resets the gate-skip throttle for a scoped order after it
+// successfully dispatches, so a recovered-then-jammed order logs again on its
+// next stall rather than staying silent for the rest of the interval window.
+func (m *memoryOrderDispatcher) clearGateSkipLog(scoped string) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	delete(m.gateSkipLogged, scoped)
 }
 
 func orderTriggerUsesLastRun(a orders.Order) bool {

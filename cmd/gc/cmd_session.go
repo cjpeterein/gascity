@@ -930,6 +930,11 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 	listResult := catalog.ListFullFromBeads(allSessionBeads, stateFilter, templateFilter)
 	sessions := listResult.Sessions
 
+	// Deterministic order matching the API path: city agents first, then rig
+	// groups in startup order, roles within a group. Keeps the controller-down
+	// fallback consistent with `gc session list` served via the supervisor.
+	api.SortSessionInfos(sessions, providerCtx.cfg)
+
 	if jsonOutput {
 		return writeSessionListJSON(sessions, stateFilter, templateFilter, stdout, stderr)
 	}

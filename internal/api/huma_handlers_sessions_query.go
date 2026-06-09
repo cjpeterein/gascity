@@ -49,6 +49,11 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
+	// Deterministic order: city agents first, then rig groups in startup
+	// order, roles within a group. Sort before pagination so cursors page
+	// through a stable sequence.
+	sortSessionResponses(items, cfg)
+
 	// Pagination support.
 	limit := maxPaginationLimit
 	if input.Limit > 0 {

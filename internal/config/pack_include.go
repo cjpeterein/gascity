@@ -139,7 +139,69 @@ type remoteImportLockEntry struct {
 }
 
 func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
+	return resolveRemoteImportCacheDir(source, cityRoot)
+}
+
+func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
+	cacheDir, ok, err := resolveRemoteImportCacheDir(source, cityRoot)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		// Distinguish "no packs.lock" from "no entry for this source" so the
+		// remediation hint is precise. This re-stat runs only on the error
+		// path, so it never adds to the hot reconcile cost.
+		lockPath := filepath.Join(cityRoot, "packs.lock")
+		if _, statErr := os.Stat(lockPath); errors.Is(statErr, os.ErrNotExist) {
+			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); run \"gc import install\"", source)
+		}
+		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc import install\"", source)
+	}
+	return cacheDir, nil
+}
+
+// remoteImportResolutionCache memoizes (source, cityRoot, packs.lock
+// fingerprint) -> validated cache directory. Config load resolves the same
+// remote import many times per gc invocation: the city pack graph, every rig
+// graph, the default-rig graph, the revision hash, and the provenance snapshot
+// each walk imports with their own dedup maps, and the whole LoadWithIncludes
+// pipeline runs several times per command. The validation memo
+// (remoteCacheValidationCache, gc-0kc) already collapses the git execs, but
+// each resolution still re-reads and re-parses packs.lock, re-stats the cache
+// for a fingerprint, and re-enters the validation memo — 18-27x per single gc
+// invocation (gc-oae). Memoizing the resolved cacheDir collapses those passes
+// so each distinct import resolves O(1) times per process.
+//
+// Keyed on the packs.lock fingerprint (size+mtime) so an upgrade or repair
+// that rewrites the lockfile is picked up within the same process. Otherwise
+// the cache is a pinned, gc-managed checkout that only "gc import install"
+// rewrites — and install always rewrites packs.lock — so a warm entry is safe
+// to reuse without re-validating. Only successful resolutions are cached;
+// errors and "not installed" results re-check so a repaired cache or a freshly
+// installed import is picked up immediately.
+var remoteImportResolutionCache sync.Map // source+"\x00"+cityRoot+"\x00"+lockfp -> string (cacheDir)
+
+// packsLockFingerprint returns a cheap change signal (size+mtime) for the
+// packs.lock at lockPath, or "-" when it is absent or unreadable. A missing
+// lockfile is never a cache hit, so the sentinel only has to be stable.
+func packsLockFingerprint(lockPath string) string {
+	if fi, err := os.Stat(lockPath); err == nil {
+		return fmt.Sprintf("%d:%d", fi.Size(), fi.ModTime().UnixNano())
+	}
+	return "-"
+}
+
+// resolveRemoteImportCacheDir resolves a locked remote import source to its
+// validated cache directory, memoized per process (see
+// remoteImportResolutionCache). ok is false with a nil error when packs.lock is
+// absent or has no entry for source.
+func resolveRemoteImportCacheDir(source, cityRoot string) (string, bool, error) {
 	lockPath := filepath.Join(cityRoot, "packs.lock")
+	key := source + "\x00" + cityRoot + "\x00" + packsLockFingerprint(lockPath)
+	if v, ok := remoteImportResolutionCache.Load(key); ok {
+		return v.(string), true, nil
+	}
+
 	data, err := os.ReadFile(lockPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -165,37 +227,8 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
 		return "", false, err
 	}
+	remoteImportResolutionCache.Store(key, cacheDir)
 	return cacheDir, true, nil
-}
-
-func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
-	lockPath := filepath.Join(cityRoot, "packs.lock")
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("remote import %s is not installed (missing packs.lock); run \"gc import install\"", source)
-		}
-		return "", fmt.Errorf("reading packs.lock: %w", err)
-	}
-
-	var lock remoteImportLockfile
-	if _, err := toml.Decode(string(data), &lock); err != nil {
-		return "", fmt.Errorf("parsing packs.lock: %w", err)
-	}
-	entry, ok := lock.Packs[source]
-	if !ok || entry.Commit == "" {
-		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); run \"gc import install\"", source)
-	}
-
-	cacheRoot, err := RepoCacheRoot()
-	if err != nil {
-		return "", err
-	}
-	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
-	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
-		return "", err
-	}
-	return cacheDir, nil
 }
 
 // remoteCacheValidationCache memoizes successful remote-cache validations. The
@@ -305,11 +338,16 @@ func selfHealSyntheticCacheLocked(source, cacheRoot, cacheDir, commit string) er
 	return err
 }
 
-// ResetRemoteCacheValidationCache clears memoized remote-cache validations
-// (test isolation; also lets `gc import install` force revalidation in-process).
+// ResetRemoteCacheValidationCache clears memoized remote-cache validations and
+// resolutions (test isolation; also lets `gc import install` force
+// revalidation in-process).
 func ResetRemoteCacheValidationCache() {
 	remoteCacheValidationCache.Range(func(k, _ any) bool {
 		remoteCacheValidationCache.Delete(k)
+		return true
+	})
+	remoteImportResolutionCache.Range(func(k, _ any) bool {
+		remoteImportResolutionCache.Delete(k)
 		return true
 	})
 }

@@ -38,7 +38,9 @@ dolt_escalate() {
         echo "dolt notify: no executable escalate.sh found" >&2
         return 1
     fi
-    "$DOLT_ESCALATE_SCRIPT" --subject "$subject" --message "$message"
+    # bd/dolt maintenance scripts run as controller exec orders, so the
+    # escalation mail carries controller attribution, not 'human' (tr-5ufc5).
+    "$DOLT_ESCALATE_SCRIPT" --from controller --subject "$subject" --message "$message"
 }
 
 dolt_notify_done() {

@@ -1,6 +1,14 @@
+# interval sets the wake cadence, not the work threshold. `gc dolt compact`
+# gates the expensive flatten/full-GC per database on commit count
+# (GC_DOLT_COMPACT_THRESHOLD_COMMITS, default 2000); under-threshold databases
+# cost only a cheap commit-count probe. A 24h cooldown let busy databases
+# accumulate a full day of commits (~2k/hour background town-wide) before the
+# gate ever ran, overshooting the threshold many times over (gascity gc-1axb5).
+# 6h keeps the per-database commit overshoot bounded to a few hours' worth while
+# the per-db gate prevents wasteful flattens on quiet databases.
 [order]
 description = "Flatten Dolt commit history to reduce storage"
 trigger = "cooldown"
-interval = "24h"
+interval = "6h"
 exec = "gc dolt compact"
 timeout = "24h"

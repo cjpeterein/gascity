@@ -552,7 +552,7 @@ func TestValidateInstalledRemoteCacheLockedSelfHealsSyntheticCache(t *testing.T)
 	t.Cleanup(ResetRemoteCacheValidationCache)
 
 	source := builtinpacks.MustSource("core")
-	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
 	cacheRoot, cacheDir := staleSyntheticCache(t, source, commit)
 
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit); err != nil {
@@ -575,7 +575,7 @@ func TestValidateInstalledRemoteCacheLockedSelfHealsAbsentSyntheticCache(t *test
 	t.Setenv(RepoCacheRootEnv, "")
 
 	source := builtinpacks.MustSource("core")
-	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
 	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
 
@@ -596,7 +596,7 @@ func TestResolveLockedRemoteImportSelfHealsSyntheticCache(t *testing.T) {
 	t.Cleanup(ResetRemoteCacheValidationCache)
 
 	source := builtinpacks.MustSource("core")
-	const commit = "abcdef1234567890abcdef1234567890abcdef12"
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
 	_, cacheDir := staleSyntheticCache(t, source, commit)
 
 	cityDir := t.TempDir()

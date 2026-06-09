@@ -82,3 +82,88 @@ func TestRemoteCacheValidationMemo_WarmAfterStatus(t *testing.T) {
 		t.Fatalf("changed cache skipped revalidation: got %d status execs, want 2", statusExecs)
 	}
 }
+
+// TestRemoteImportResolutionMemo_CollapsesPasses is a regression test for the
+// redundant-resolution multiplier (gc-oae). Config load resolves the same
+// remote import 18-27x per gc invocation (city graph, per-rig graphs,
+// default-rig graph, revision hash, provenance snapshot, each over several
+// LoadWithIncludes passes). The validation memo (gc-0kc) collapses the git
+// execs, but each resolution still re-reads packs.lock, re-fingerprints, and
+// re-enters validation. resolveLockedRemoteImport must memoize the resolved
+// cacheDir per (source, cityRoot, packs.lock fingerprint) so each distinct
+// import resolves O(1) times — and so a lockfile rewrite still forces a fresh
+// validation.
+func TestRemoteImportResolutionMemo_CollapsesPasses(t *testing.T) {
+	ResetRemoteCacheValidationCache()
+	t.Cleanup(ResetRemoteCacheValidationCache)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cityRoot := t.TempDir()
+	source := "https://github.com/example/resolve-memo.git"
+
+	// Build the cache checkout in a scratch dir first: its commit hash is not
+	// predictable, but the cacheDir path is derived from it via RepoCacheKey.
+	scratch := filepath.Join(t.TempDir(), "checkout")
+	mustMkdirAll(t, scratch, 0o755)
+	writeTestFile(t, scratch, "pack.toml", "[pack]\nname = \"resolve-memo\"\nschema = 1\n")
+	if _, err := runRepoCacheGit(scratch, "init"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if _, err := runRepoCacheGit(scratch, "add", "pack.toml"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if _, err := runRepoCacheGit(scratch, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "seed"); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+	commit, err := runRepoCacheGit(scratch, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("git rev-parse: %v", err)
+	}
+
+	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
+	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, commit))
+	mustMkdirAll(t, cacheRoot, 0o755)
+	if err := os.Rename(scratch, cacheDir); err != nil {
+		t.Fatalf("relocate checkout: %v", err)
+	}
+
+	lockPath := filepath.Join(cityRoot, "packs.lock")
+	writeTestFile(t, cityRoot, "packs.lock", "schema = 1\n\n[packs.\""+source+"\"]\ncommit = \""+commit+"\"\n")
+
+	// Repeated resolutions of a clean cache all succeed and agree on the dir.
+	for i := 0; i < 5; i++ {
+		dir, ok, rErr := resolveLockedRemoteImport(source, cityRoot)
+		if rErr != nil {
+			t.Fatalf("resolve %d: %v", i, rErr)
+		}
+		if !ok || dir != cacheDir {
+			t.Fatalf("resolve %d: got (%q, %v), want (%q, true)", i, dir, ok, cacheDir)
+		}
+	}
+
+	// Corrupt the checkout WITHOUT touching packs.lock: an untracked file makes
+	// `git status --ignored` non-empty and bumps the gc-0kc checkout
+	// fingerprint, so an un-memoized resolution would re-validate and error.
+	// The resolution memo is keyed on the packs.lock fingerprint, which is
+	// unchanged, so it must still serve the warm cacheDir.
+	writeTestFile(t, cacheDir, "stray.txt", "dirty\n")
+	dir, ok, rErr := resolveLockedRemoteImport(source, cityRoot)
+	if rErr != nil {
+		t.Fatalf("warm resolve after checkout corruption re-validated: %v", rErr)
+	}
+	if !ok || dir != cacheDir {
+		t.Fatalf("warm resolve after corruption: got (%q, %v), want (%q, true)", dir, ok, cacheDir)
+	}
+
+	// Rewriting packs.lock (an `gc import install`/upgrade) bumps its
+	// fingerprint, so the memo must invalidate and re-validate — which now
+	// catches the dirty checkout and errors.
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(lockPath, future, future); err != nil {
+		t.Fatalf("touch packs.lock: %v", err)
+	}
+	if _, _, rErr := resolveLockedRemoteImport(source, cityRoot); rErr == nil {
+		t.Fatal("packs.lock change did not force revalidation: dirty checkout resolved clean")
+	}
+}

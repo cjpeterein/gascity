@@ -61,6 +61,7 @@ var inferenceDisabledOrders = []string{
 	"cross-rig-deps",
 	"dolt-health",
 	"dolt-remotes-patrol",
+	"dolt-working-set-gc",
 	"gate-sweep",
 	"mol-dog-backup",
 	"mol-dog-compactor",

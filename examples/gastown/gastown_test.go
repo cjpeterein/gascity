@@ -4007,7 +4007,7 @@ func TestRefineryAssignedWorkQueriesUsePortableRigScope(t *testing.T) {
 		{
 			name: "prompt orphan scan",
 			body: prompt,
-			want: `ORPHANS=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --metadata-field gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery" --status=open --json 2>/dev/null \`,
+			want: `ORPHANS=$(gc bd list ${GC_RIG:+--rig="$GC_RIG"} --assignee="$GC_AGENT" --status=open \`,
 		},
 		{
 			name: "prompt quick reference",

@@ -85,7 +85,7 @@ func TestCreatePoolSessionBead_UsesExplicitIDThroughCachingStore(t *testing.T) {
 	if !strings.HasPrefix(bead.ID, "mc-session-") {
 		t.Fatalf("bead.ID = %q, want explicit mc-session-* ID", bead.ID)
 	}
-	wantSessionName := PoolSessionName("gascity/claude", bead.ID)
+	wantSessionName := PoolSessionNameForInstance("gascity/claude", bead.ID)
 	if got := bead.Metadata["session_name"]; got != wantSessionName {
 		t.Fatalf("session_name = %q, want %q", got, wantSessionName)
 	}

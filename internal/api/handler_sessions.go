@@ -260,6 +260,11 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 	}
 
+	// Deterministic order: city agents first, then rig groups in startup
+	// order, roles within a group. Sort before pagination so cursors page
+	// through a stable sequence.
+	sortSessionResponses(items, cfg)
+
 	pp := parsePagination(r, maxPaginationLimit)
 	if !pp.IsPaging {
 		if pp.Limit < len(items) {

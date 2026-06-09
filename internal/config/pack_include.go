@@ -170,7 +170,7 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 		return "", false, nil
 	}
 
-	cacheRoot, err := GlobalRepoCacheRoot()
+	cacheRoot, err := RepoCacheRoot()
 	if err != nil {
 		return "", false, err
 	}
@@ -344,7 +344,7 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (str
 		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); %s", source, notCachedRemediation(source, declaredVersion))
 	}
 
-	cacheRoot, err := GlobalRepoCacheRoot()
+	cacheRoot, err := RepoCacheRoot()
 	if err != nil {
 		return "", err
 	}
@@ -418,14 +418,16 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 		return validateInstalledRemoteCache(source, cacheDir, commit)
 	}); err != nil {
 		// A synthetic bundled-pack cache is a deterministic projection of the
-		// running binary's embedded packs. When the only fault is a content-hash
-		// mismatch (the binary was rebuilt), the cache can be rebuilt in-process
-		// with no network. Self-heal that case instead of bricking every
-		// read-only command until a human runs "gc import install". Tamper and
-		// corruption failures (content drift, extra files, bad marker) are NOT
-		// hash mismatches and still hard-fail; remote git imports have no offline
-		// rebuild path and also keep their hard failure.
-		if !errors.Is(err, builtinpacks.ErrSyntheticContentHashMismatch) {
+		// running binary's embedded packs, so two faults are rebuildable
+		// in-process with no network: a content-hash mismatch (the binary was
+		// rebuilt) and an absent cache (cold or isolated cache root). Self-heal
+		// those instead of bricking every read-only command until a human runs
+		// "gc import install". Tamper and corruption failures (bad schema,
+		// content drift, repo/commit mismatch) are neither sentinel and still
+		// hard-fail; remote git imports have no offline rebuild path and also
+		// keep their hard failure.
+		if !errors.Is(err, builtinpacks.ErrSyntheticContentHashMismatch) &&
+			!errors.Is(err, builtinpacks.ErrSyntheticCacheMissing) {
 			return err
 		}
 		if healErr := selfHealSyntheticCacheLocked(source, cacheRoot, cacheDir, commit); healErr != nil {
@@ -555,6 +557,37 @@ func RepoCacheKey(source, commit string) string {
 	}
 	sum := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%x", sum[:])
+}
+
+// RepoCacheRootEnv is the environment variable that overrides the machine-local
+// repo cache root. Test harnesses that must keep the real HOME (e.g. the
+// platform supervisor validates HOME == OS user home) set this to a temp dir so
+// shelling `gc` never stamps the shared synthetic-pack marker into the live
+// ~/.gc/cache/repos.
+const RepoCacheRootEnv = "GC_REPO_CACHE_ROOT"
+
+// RepoCacheRoot returns the canonical machine-local repo cache root.
+//
+// Resolution order:
+//  1. GC_REPO_CACHE_ROOT (dedicated isolation override)
+//  2. $GC_HOME/cache/repos (matches gchome.Default and the lock-root candidates)
+//  3. $HOME/.gc/cache/repos (default)
+//
+// This is the single source of truth for the cache root. Every reader and
+// writer (packman materialize/install and config import validation) must route
+// through it so they never disagree on where the cache lives.
+func RepoCacheRoot() (string, error) {
+	if override := strings.TrimSpace(os.Getenv(RepoCacheRootEnv)); override != "" {
+		return override, nil
+	}
+	if gcHome := strings.TrimSpace(os.Getenv("GC_HOME")); gcHome != "" {
+		return filepath.Join(gcHome, "cache", "repos"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home dir: %w", err)
+	}
+	return filepath.Join(home, ".gc", "cache", "repos"), nil
 }
 
 // NormalizeRemoteSource extracts the clone URL from a source string,

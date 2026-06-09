@@ -427,6 +427,9 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	if hasCacheEventField(fields, "created_at") {
 		merged.CreatedAt = patch.CreatedAt
 	}
+	if hasCacheEventField(fields, "updated_at") {
+		merged.UpdatedAt = patch.UpdatedAt
+	}
 	if hasCacheEventField(fields, "assignee") {
 		merged.Assignee = patch.Assignee
 	}

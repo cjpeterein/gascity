@@ -2151,3 +2151,75 @@ func TestScaledPool_NotAffectedByRunningOverride(t *testing.T) {
 	})
 	assertAsleep(t, result, "polecat-mc-1")
 }
+
+// TestRefinery_OpenBranchMergeWorkKeepsWarmAcrossStates is the gc-t90
+// regression guard. A polecat done-sequence reassigns its work bead to the
+// refinery as status=open with the refinery identity as assignee and a
+// `branch` metadata key. The refinery is an on_demand named session that
+// may be asleep, freshly creating, or already active when that handoff
+// lands. In every one of those states the controller MUST keep the refinery
+// awake so it reaches its find-work+merge cycle — otherwise the assigned
+// merge work strands until idle_timeout (hours later). The wake demand comes
+// from the assigned-work pass: the reconciler bridge marks open assigned work
+// Ready=true, so ComputeAwakeSet emits reason="assigned-work". This locks
+// that behavior against regressions disguised as the misread "completes then
+// tears down" symptom in the bug report.
+func TestRefinery_OpenBranchMergeWorkKeepsWarmAcrossStates(t *testing.T) {
+	const (
+		identity = "petereinc-gascity-pack/gastown.refinery"
+		runtime  = "petereinc-gascity-pack--gastown__refinery"
+	)
+	for _, state := range []string{"asleep", "creating", "active"} {
+		t.Run(state, func(t *testing.T) {
+			result := ComputeAwakeSet(AwakeInput{
+				Agents:        []AwakeAgent{{QualifiedName: identity}},
+				NamedSessions: []AwakeNamedSession{{Identity: identity, Template: identity, Mode: "on_demand", RuntimeName: runtime}},
+				SessionBeads: []AwakeSessionBead{{
+					ID:            "sess-1",
+					SessionName:   runtime,
+					Template:      identity,
+					State:         state,
+					NamedIdentity: identity,
+				}},
+				// Open merge work assigned to the refinery, carrying branch
+				// metadata — the post-done-sequence handoff shape. The bridge
+				// sets Ready=true for open assigned work it has already passed
+				// through readiness/blocker filtering.
+				WorkBeads: []AwakeWorkBead{{ID: "pgp-7mc", Assignee: identity, Status: "open", Ready: true}},
+				Now:       now,
+			})
+			assertAwake(t, result, runtime)
+			assertReason(t, result, runtime, "assigned-work")
+		})
+	}
+}
+
+// TestRefinery_OpenBranchMergeWorkOverridesDefaultIdleSleep guards the same
+// keep-warm path against the idle-sleep suppression rung: even when the
+// refinery has been idle well past the default on-demand idle timeout, an
+// open assigned branch-merge bead must veto idle sleep so the merge cycle
+// runs. assigned-work is exempt from idle suppression by design (see the
+// desired[name] != "assigned-work" guard in ComputeAwakeSet).
+func TestRefinery_OpenBranchMergeWorkOverridesDefaultIdleSleep(t *testing.T) {
+	const (
+		identity = "petereinc-gascity-pack/gastown.refinery"
+		runtime  = "petereinc-gascity-pack--gastown__refinery"
+	)
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: identity}},
+		NamedSessions: []AwakeNamedSession{{Identity: identity, Template: identity, Mode: "on_demand", RuntimeName: runtime}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "sess-1",
+			SessionName:   runtime,
+			Template:      identity,
+			State:         "active",
+			NamedIdentity: identity,
+			IdleSince:     now.Add(-(defaultOnDemandIdleTimeout + time.Minute)),
+		}},
+		WorkBeads:       []AwakeWorkBead{{ID: "pgp-7mc", Assignee: identity, Status: "open", Ready: true}},
+		RunningSessions: map[string]bool{runtime: true},
+		Now:             now,
+	})
+	assertAwake(t, result, runtime)
+	assertReason(t, result, runtime, "assigned-work")
+}

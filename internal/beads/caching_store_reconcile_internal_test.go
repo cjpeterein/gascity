@@ -466,6 +466,136 @@ func TestRunReconciliationLogEmitsAgainAfterWindow(t *testing.T) {
 	}
 }
 
+// TestCachingStoreReconciliationDoesNotResurrectClosedBeadFromStaleList
+// reproduces gc-62iua: the refinery closes a work bead in another process;
+// the controller's cache learns of the close via ApplyEvent("bead.closed")
+// and stamps the close-time updated_at. ~20s later runReconciliation runs a
+// full backing scan that returns a STALE snapshot still showing the bead
+// open (an older Dolt revision / JSONL mirror). The diff must not overwrite
+// the fresher cached closed row with the stale open row, and must not emit a
+// spurious bead.updated event reopening it. updated_at is the discriminator:
+// the stale row carries an older timestamp than the cached close.
+func TestCachingStoreReconciliationDoesNotResurrectClosedBeadFromStaleList(t *testing.T) {
+	mem := NewMemStore()
+	bead, err := mem.Create(Bead{Title: "merged work"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	staleOpen := cloneBead(bead) // open snapshot, original (older) updated_at
+
+	backing := &reconcileRaceStore{
+		Store:   mem,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		stale:   []Bead{staleOpen},
+	}
+
+	var events []string
+	var eventsMu sync.Mutex
+	cs := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		eventsMu.Lock()
+		defer eventsMu.Unlock()
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	// The refinery closes the bead in the backing store, stamping a newer
+	// updated_at, then the close event reaches this process's cache.
+	if err := mem.Close(bead.ID); err != nil {
+		t.Fatalf("Close backing: %v", err)
+	}
+	closed, err := mem.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get closed: %v", err)
+	}
+	if !closed.UpdatedAt.After(staleOpen.UpdatedAt) {
+		t.Fatalf("close did not advance updated_at: close=%s stale=%s", closed.UpdatedAt, staleOpen.UpdatedAt)
+	}
+	closePayload, err := json.Marshal(closed)
+	if err != nil {
+		t.Fatalf("Marshal close: %v", err)
+	}
+	cs.ApplyEvent("bead.closed", closePayload)
+	eventsMu.Lock()
+	events = nil
+	eventsMu.Unlock()
+
+	// Now reconcile against the stale OPEN snapshot.
+	backing.mu.Lock()
+	backing.block = true
+	backing.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		cs.runReconciliation()
+		close(done)
+	}()
+	<-backing.started
+	close(backing.release)
+	<-done
+
+	got, err := cs.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get after reconcile: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("bead resurrected: status = %q, want closed", got.Status)
+	}
+
+	eventsMu.Lock()
+	defer eventsMu.Unlock()
+	for _, e := range events {
+		if e == "bead.updated:"+bead.ID || e == "bead.created:"+bead.ID {
+			t.Fatalf("reconciliation re-emitted a reopen event: %v", events)
+		}
+	}
+}
+
+// TestCachingStoreClosedEventStampsUpdatedAt reproduces the second half of
+// gc-62iua: a rich bead.closed event carrying a fresh updated_at must update
+// the cached row's UpdatedAt so the cache's own timestamp is authoritative.
+// Without this, the cached closed row keeps its pre-close timestamp and a
+// later stale reconcile scan cannot be distinguished from the close.
+func TestCachingStoreClosedEventStampsUpdatedAt(t *testing.T) {
+	mem := NewMemStore()
+	bead, err := mem.Create(Bead{Title: "stamp me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cs := NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	if err := mem.Close(bead.ID); err != nil {
+		t.Fatalf("Close backing: %v", err)
+	}
+	closed, err := mem.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get closed: %v", err)
+	}
+	if !closed.UpdatedAt.After(bead.UpdatedAt) {
+		t.Fatalf("close did not advance updated_at: close=%s create=%s", closed.UpdatedAt, bead.UpdatedAt)
+	}
+	closePayload, err := json.Marshal(closed)
+	if err != nil {
+		t.Fatalf("Marshal close: %v", err)
+	}
+	cs.ApplyEvent("bead.closed", closePayload)
+
+	cs.mu.RLock()
+	cached := cs.beads[bead.ID]
+	cs.mu.RUnlock()
+	if cached.Status != "closed" {
+		t.Fatalf("cached status = %q, want closed", cached.Status)
+	}
+	if !cached.UpdatedAt.Equal(closed.UpdatedAt) {
+		t.Fatalf("cached UpdatedAt = %s, want close-time %s", cached.UpdatedAt, closed.UpdatedAt)
+	}
+}
+
 // failingScanStore fails full-scan List calls (the Prime path) while
 // letting status-filtered List calls (the PrimeActive path) through, so
 // tests can model a store whose initial full prime fails.

@@ -19,11 +19,12 @@ var (
 	materializeSyntheticRepo = builtinpacks.MaterializeSyntheticRepo
 )
 
-// RepoCacheRoot returns the shared machine-local repo cache root,
-// honoring the GC_HOME override via config.GlobalRepoCacheRoot so the
-// install and resolve sides always agree on one cache.
+// RepoCacheRoot returns the shared machine-local repo cache root.
+// Delegates to config.RepoCacheRoot so the loader (read/validate path) and
+// packman (write path) always agree on where the cache lives, including the
+// GC_REPO_CACHE_ROOT isolation override.
 func RepoCacheRoot() (string, error) {
-	return config.GlobalRepoCacheRoot()
+	return config.RepoCacheRoot()
 }
 
 // RepoCacheKey returns the canonical source+commit cache key.

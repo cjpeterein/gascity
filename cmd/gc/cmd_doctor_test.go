@@ -533,7 +533,7 @@ func TestDoDoctorRegistersStaleLocalPackDirCheckForRemoteImport(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 	source := "https://github.com/gastownhall/gc-actual-packs"
-	commit := writeDoctorRemotePackFixture(t, homeDir, source)
+	commit := writeDoctorRemotePackFixture(t, source)
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -572,7 +572,7 @@ func TestDoDoctorRegistersStaleLocalPackDirCheckForRigRemoteImport(t *testing.T)
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 	source := "https://github.com/gastownhall/gc-actual-packs"
-	commit := writeDoctorRemotePackFixture(t, homeDir, source)
+	commit := writeDoctorRemotePackFixture(t, source)
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -618,7 +618,7 @@ func TestDoDoctorRegistersStaleLocalPackDirCheckForDefaultRigRemoteImport(t *tes
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	source := "https://github.com/gastownhall/gc-actual-packs"
-	commit := writeDoctorRemotePackFixture(t, homeDir, source)
+	commit := writeDoctorRemotePackFixture(t, source)
 
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -657,9 +657,10 @@ schema = 2
 	}
 }
 
-func writeDoctorRemotePackFixture(t *testing.T, homeDir, source string) string {
+func writeDoctorRemotePackFixture(t *testing.T, source string) string {
 	t.Helper()
 
+	isolateRepoCacheRoot(t)
 	repoDir := filepath.Join(t.TempDir(), "remote-pack")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -674,7 +675,11 @@ schema = 1
 	mustGitImport(t, repoDir, "add", ".")
 	mustGitImport(t, repoDir, "commit", "-m", "initial")
 	commit := gitOutputImport(t, repoDir, "rev-parse", "HEAD")
-	cacheDir := filepath.Join(homeDir, ".gc", "cache", "repos", config.RepoCacheKey(source, commit))
+	cacheRoot, err := config.RepoCacheRoot()
+	if err != nil {
+		t.Fatalf("RepoCacheRoot: %v", err)
+	}
+	cacheDir := filepath.Join(cacheRoot, config.RepoCacheKey(source, commit))
 	if err := os.MkdirAll(filepath.Dir(cacheDir), 0o755); err != nil {
 		t.Fatal(err)
 	}

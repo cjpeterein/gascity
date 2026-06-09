@@ -169,7 +169,7 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 		return "", false, nil
 	}
 
-	cacheRoot, err := GlobalRepoCacheRoot()
+	cacheRoot, err := RepoCacheRoot()
 	if err != nil {
 		return "", false, err
 	}
@@ -343,7 +343,7 @@ func resolveInstalledRemoteImport(source, declaredVersion, cityRoot string) (str
 		return "", fmt.Errorf("remote import %s is not installed (missing packs.lock entry); %s", source, notCachedRemediation(source, declaredVersion))
 	}
 
-	cacheRoot, err := GlobalRepoCacheRoot()
+	cacheRoot, err := RepoCacheRoot()
 	if err != nil {
 		return "", err
 	}
@@ -558,6 +558,37 @@ func RepoCacheKey(source, commit string) string {
 	}
 	sum := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%x", sum[:])
+}
+
+// RepoCacheRootEnv is the environment variable that overrides the machine-local
+// repo cache root. Test harnesses that must keep the real HOME (e.g. the
+// platform supervisor validates HOME == OS user home) set this to a temp dir so
+// shelling `gc` never stamps the shared synthetic-pack marker into the live
+// ~/.gc/cache/repos.
+const RepoCacheRootEnv = "GC_REPO_CACHE_ROOT"
+
+// RepoCacheRoot returns the canonical machine-local repo cache root.
+//
+// Resolution order:
+//  1. GC_REPO_CACHE_ROOT (dedicated isolation override)
+//  2. $GC_HOME/cache/repos (matches gchome.Default and the lock-root candidates)
+//  3. $HOME/.gc/cache/repos (default)
+//
+// This is the single source of truth for the cache root. Every reader and
+// writer (packman materialize/install and config import validation) must route
+// through it so they never disagree on where the cache lives.
+func RepoCacheRoot() (string, error) {
+	if override := strings.TrimSpace(os.Getenv(RepoCacheRootEnv)); override != "" {
+		return override, nil
+	}
+	if gcHome := strings.TrimSpace(os.Getenv("GC_HOME")); gcHome != "" {
+		return filepath.Join(gcHome, "cache", "repos"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home dir: %w", err)
+	}
+	return filepath.Join(home, ".gc", "cache", "repos"), nil
 }
 
 // NormalizeRemoteSource extracts the clone URL from a source string,

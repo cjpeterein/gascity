@@ -268,6 +268,26 @@ my-city/
 The cache is an implementation detail owned by `gc import`. The loader
 consumes the resolved directories that `gc import install` prepared.
 
+### Cache root resolution
+
+`config.RepoCacheRoot` is the single source of truth for the machine-local
+cache root. Both the write path (`packman` materialize/install, via
+`packman.RepoCacheRoot`) and the read path (loader import validation) route
+through it so they never disagree on where the cache lives. Resolution order:
+
+1. `GC_REPO_CACHE_ROOT` — dedicated isolation override.
+2. `$GC_HOME/cache/repos` — matches `gchome.Default` and the repo-cache lock
+   root candidates.
+3. `$HOME/.gc/cache/repos` — default.
+
+`GC_REPO_CACHE_ROOT` exists for test harnesses that must keep the real `HOME`
+(the platform supervisor validates `HOME` against the OS user home). Without an
+isolation knob, a test binary that materializes the bundled synthetic-pack
+cache stamps the shared `.gc-bundled-pack-cache.toml` marker into the live
+`~/.gc/cache/repos`, whose content hash no longer matches the running binary —
+bricking every config-loading `gc` command city-wide until `gc import install`
+is re-run.
+
 ## Non-goals
 
 This launch does not define:

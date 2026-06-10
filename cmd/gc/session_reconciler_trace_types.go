@@ -94,6 +94,7 @@ const (
 	TraceSiteReconcilerIdleTimeout          TraceSiteCode = "reconciler.session.idle_timeout"
 	TraceSiteReconcilerResetStalled         TraceSiteCode = "reconciler.session.reset_stalled"
 	TraceSiteReconcilerProgressStallExempt  TraceSiteCode = "reconciler.session.progress_stall_exempt"
+	TraceSiteReconcilerAPIErrorWedge        TraceSiteCode = "reconciler.session.api_error_wedge"
 	TraceSiteReconcilerWakeDecision         TraceSiteCode = "reconciler.session.wake_decision"
 	TraceSiteReconcilerDrainDecision        TraceSiteCode = "reconciler.session.drain"
 	TraceSiteDrainStale                     TraceSiteCode = "reconciler.drain.stale"

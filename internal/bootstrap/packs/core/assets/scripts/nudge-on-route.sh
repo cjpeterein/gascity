@@ -9,11 +9,13 @@
 # currently in an active turn cycle.
 #
 # This order is exactly that workaround, shipped. It subscribes to
-# bead.updated events; whenever a bead carries a gc.routed_to target it
-# runs `gc session nudge <target> "<message>"`. Idempotent: a given
-# (bead, routed_to) pair is nudged at most once. Dedup state lives in
-# $GC_PACK_STATE_DIR/nudge-on-route-state.json, so it is both city- and
-# pack-scoped — multi-city installs never cross-pollinate.
+# bead.updated events; whenever a bead carries a gc.routed_to target with an
+# ACTIVE session it runs `gc session nudge <session> "<message>"`. Targets
+# with no active session are skipped — queued nudges at dormant targets can
+# never deliver and strand until TTL (gc-i4s); demand-driven wake owns them.
+# Idempotent: a given (bead, routed_to) pair is nudged at most once. Dedup
+# state lives in $GC_PACK_STATE_DIR/nudge-on-route-state.json, so it is both
+# city- and pack-scoped — multi-city installs never cross-pollinate.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -54,30 +56,54 @@ duration_to_seconds() {
     esac
 }
 
-# Nudge the session(s) named by a routed_to target. A multi-session pool
-# routes to the pool BASE (NormalizePoolRouteTarget collapses slot -> base),
-# which is the members' `template`, not a session name — `gc session nudge`
-# resolves a single session and cannot target a pool base. So enumerate the
-# pool's active members by template and nudge each; a target with no members
-# (a single-session agent, or an explicit slot name) is nudged directly.
+# Snapshot the active session list once per run. Each routed target is
+# matched against this snapshot instead of shelling out per target, and a
+# fetch failure (API down) degrades to "no active sessions" — every target
+# is skipped this run and retried on the next event evaluation.
+ACTIVE_SESSIONS="$(gc session list --json --state active 2>/dev/null \
+    | jq -c '(.sessions // []) | map({name: (.name // .id), template: (.template // ""), alias: (.alias // "")})' 2>/dev/null)" \
+    || ACTIVE_SESSIONS="[]"
+[ -n "$ACTIVE_SESSIONS" ] || ACTIVE_SESSIONS="[]"
+
+# Nudge the active session(s) named by a routed_to target. A multi-session
+# pool routes to the pool BASE (NormalizePoolRouteTarget collapses slot ->
+# base), which is the members' `template`, not a session name — `gc session
+# nudge` resolves a single session and cannot target a pool base. So match
+# the target against active templates first (pool fan-out; single-session
+# agents also carry their own name as template), then against active session
+# names/aliases (explicit slot or agent targets).
+#
+# A target with no active session is SKIPPED, never nudged: `gc session
+# nudge` at a dormant target queues a session-fenced nudge that can never
+# deliver and strands until its 24h TTL, polluting every ready projection
+# on the way (gc-i4s). Waking dormant targets is the controller's job —
+# routed demand wakes pools via scale_check counts and named sessions via
+# demand checks, and a freshly spawned session reads its hook at startup.
 # Returns 0 if at least one nudge succeeded, non-zero otherwise.
 nudge_routed_target() {
     _target="$1"
-    _members="$(gc session list --json --state active --template "$_target" 2>/dev/null \
-        | jq -r '(.sessions // [])[] | .name // .id' 2>/dev/null)" || _members=""
-    if [ -n "$_members" ]; then
-        _any=1
-        while IFS= read -r _m; do
-            [ -n "$_m" ] || continue
-            if gc session nudge "$_m" "$NUDGE_MESSAGE" >/dev/null 2>&1; then
-                _any=0
-            fi
-        done <<MEMBERS
+    _members="$(printf '%s' "$ACTIVE_SESSIONS" \
+        | jq -r --arg t "$_target" '.[] | select(.template == $t) | .name' 2>/dev/null)" || _members=""
+    if [ -z "$_members" ]; then
+        _members="$(printf '%s' "$ACTIVE_SESSIONS" \
+            | jq -r --arg t "$_target" '.[] | select(.name == $t or .alias == $t) | .name' 2>/dev/null)" || _members=""
+    fi
+    if [ -z "$_members" ]; then
+        # No active session for this target: skip without recording dedup
+        # state, so the pair is re-evaluated (and nudged) if the routing is
+        # still emitting events once the target has an active session.
+        return 1
+    fi
+    _any=1
+    while IFS= read -r _m; do
+        [ -n "$_m" ] || continue
+        if gc session nudge "$_m" "$NUDGE_MESSAGE" >/dev/null 2>&1; then
+            _any=0
+        fi
+    done <<MEMBERS
 $_members
 MEMBERS
-        return "$_any"
-    fi
-    gc session nudge "$_target" "$NUDGE_MESSAGE" >/dev/null 2>&1
+    return "$_any"
 }
 
 # Pull recent bead.updated events. Best-effort: a read failure (API down)
@@ -101,6 +127,7 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
+SKIPPED=0
 while IFS="$(printf '\t')" read -r bead_id routed_to; do
     if [ -z "$bead_id" ] || [ -z "$routed_to" ]; then continue; fi
     key="$bead_id|$routed_to"
@@ -113,6 +140,8 @@ while IFS="$(printf '\t')" read -r bead_id routed_to; do
     if nudge_routed_target "$routed_to"; then
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         NUDGED=$((NUDGED + 1))
+    else
+        SKIPPED=$((SKIPPED + 1))
     fi
 done <<EOF
 $PAIRS
@@ -130,4 +159,7 @@ mv -f "$TMP" "$STATE_FILE"
 
 if [ "$NUDGED" -gt 0 ]; then
     echo "nudge-on-route: nudged $NUDGED newly-routed bead(s)"
+fi
+if [ "$SKIPPED" -gt 0 ]; then
+    echo "nudge-on-route: skipped $SKIPPED routed bead(s) — target has no active session (or nudge failed); demand wake owns dormant targets"
 fi

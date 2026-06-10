@@ -13,7 +13,8 @@ Your role is determined by the GC_AGENT environment variable and injected by
 ### Dolt Server
 
 Dolt is the data plane for beads (issues, mail, work history). It runs as a
-single server on port 3307 serving all databases. **It is fragile.**
+single server serving all databases on the city's configured port (see
+`gc dolt status` or dolt-config.yaml). **It is fragile.**
 
 If you detect Dolt trouble (commands hang/timeout, "connection refused",
 "database not found", query latency > 5s, unexpected empty results):

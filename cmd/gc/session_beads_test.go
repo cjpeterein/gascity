@@ -620,6 +620,10 @@ func TestSyncSessionBeads_DoesNotCreateFallbackForConfiguredNamedConflict(t *tes
 		},
 	}
 
+	// A genuine squatter backs a DIFFERENT template than the configured
+	// named session while claiming its alias. A pool bead that backs the
+	// MATCHING template would instead be adopted as the session itself
+	// (see internal/session: alias-matched pool bead adoption).
 	if _, err := store.Create(beads.Bead{
 		Title:  "squatter",
 		Type:   sessionBeadType,
@@ -627,7 +631,7 @@ func TestSyncSessionBeads_DoesNotCreateFallbackForConfiguredNamedConflict(t *tes
 		Metadata: map[string]string{
 			"session_name": "other-session",
 			"alias":        "myrig/witness",
-			"template":     "myrig/witness",
+			"template":     "myrig/other",
 			"state":        "active",
 		},
 	}); err != nil {
@@ -669,6 +673,81 @@ func TestSyncSessionBeads_DoesNotCreateFallbackForConfiguredNamedConflict(t *tes
 	}
 	if !strings.Contains(stderr.String(), "blocks configured named session") {
 		t.Fatalf("stderr = %q, want preserved-conflict diagnostic", stderr.String())
+	}
+}
+
+func TestSyncSessionBeads_AdoptsOnDemandPoolBeadAsCanonical(t *testing.T) {
+	// An on_demand named session materialized via the ephemeral/pool path
+	// claims its own alias with the matching backing template, but carries a
+	// suffixed session_name and no configured_named_session marker. It must be
+	// adopted as the session's canonical bead, not flagged as a conflict that
+	// blocks the identity (gc-g7u).
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "witness", Dir: "myrig"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "witness", Dir: "myrig"},
+		},
+	}
+
+	pool, err := store.Create(beads.Bead{
+		Title:  "pool-witness",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":   "myrig--witness-abc123",
+			"alias":          "myrig/witness",
+			"template":       "myrig/witness",
+			"agent_name":     "myrig/witness",
+			"session_origin": "ephemeral",
+			"pool_managed":   "true",
+			"state":          "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating pool bead: %v", err)
+	}
+
+	// buildDesiredState adopts the alias-matched pool bead as canonical and
+	// threads ITS suffixed session_name into the desired-state key
+	// (build_desired_state.go: hasCanonical -> tp.SessionName = canonical sn).
+	// Model that here so syncSessionBeads sees the pool bead as desired rather
+	// than orphaned.
+	ds := map[string]TemplateParams{
+		"myrig--witness-abc123": {
+			SessionName:             "myrig--witness-abc123",
+			TemplateName:            "myrig/witness",
+			InstanceName:            "myrig/witness",
+			Alias:                   "myrig/witness",
+			Command:                 "claude",
+			ConfiguredNamedIdentity: "myrig/witness",
+			ConfiguredNamedMode:     "on_demand",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	all, err := store.ListByLabel(sessionBeadLabel, 0)
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected only the adopted pool bead to remain, got %d beads", len(all))
+	}
+	if all[0].ID != pool.ID {
+		t.Fatalf("surviving bead = %q, want adopted pool bead %q", all[0].ID, pool.ID)
+	}
+	if all[0].Status == "closed" {
+		t.Fatalf("pool bead was closed; metadata=%v", all[0].Metadata)
+	}
+	if strings.Contains(stderr.String(), "blocks configured named session") {
+		t.Fatalf("stderr = %q, want no conflict diagnostic for adopted pool bead", stderr.String())
 	}
 }
 
@@ -1422,6 +1501,9 @@ func TestSyncSessionBeads_DoesNotReopenConfiguredNamedSessionAcrossLiveConflict(
 	if err := store.Close(closed.ID); err != nil {
 		t.Fatalf("close canonical bead: %v", err)
 	}
+	// A genuine squatter backs a DIFFERENT template than the configured
+	// named session while claiming its alias. A pool bead backing the
+	// MATCHING template would instead be adopted as the session itself.
 	blocker, err := store.Create(beads.Bead{
 		Title:  "squatter",
 		Type:   sessionBeadType,
@@ -1429,7 +1511,7 @@ func TestSyncSessionBeads_DoesNotReopenConfiguredNamedSessionAcrossLiveConflict(
 		Metadata: map[string]string{
 			"session_name": "other-session",
 			"alias":        "refinery",
-			"template":     "refinery",
+			"template":     "other",
 			"state":        "active",
 		},
 	})

@@ -95,6 +95,125 @@ func TestFindCanonicalNamedSessionBead_SkipsFailedCreate(t *testing.T) {
 	}
 }
 
+func TestBeadConflictsWithNamedSession_PoolBeadMatchingSpecIsNotConflict(t *testing.T) {
+	// An on_demand named session materialized via the ephemeral/pool path
+	// carries alias==identity and template==backing template, but a suffixed
+	// session_name and no configured_named_session marker. It IS the session,
+	// so it must not be classified as a conflict against its own identity.
+	spec := NamedSessionSpec{
+		Agent:       &config.Agent{Name: "refinery", Dir: "gascity"},
+		Identity:    "gascity/refinery",
+		SessionName: "test-city--gascity--refinery",
+	}
+	poolBead := beads.Bead{
+		ID:     "pool-refinery",
+		Type:   BeadType,
+		Status: "open",
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias":          "gascity/refinery",
+			"template":       "gascity/refinery",
+			"agent_name":     "gascity/refinery",
+			"session_name":   "test-city--gascity--refinery-abc123",
+			"session_origin": "ephemeral",
+			"pool_managed":   "true",
+		},
+	}
+	if BeadConflictsWithNamedSession(poolBead, spec) {
+		t.Fatal("BeadConflictsWithNamedSession() = true for a pool bead matching the spec, want false")
+	}
+}
+
+func TestBeadConflictsWithNamedSession_AliasMatchTemplateMismatchStillConflicts(t *testing.T) {
+	// A bead that claims the alias but backs a different template is a
+	// genuine conflict and must keep being reported as one.
+	spec := NamedSessionSpec{
+		Agent:       &config.Agent{Name: "refinery", Dir: "gascity"},
+		Identity:    "gascity/refinery",
+		SessionName: "test-city--gascity--refinery",
+	}
+	intruder := beads.Bead{
+		ID:     "intruder",
+		Type:   BeadType,
+		Status: "open",
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias":    "gascity/refinery",
+			"template": "gascity/other",
+		},
+	}
+	if !BeadConflictsWithNamedSession(intruder, spec) {
+		t.Fatal("BeadConflictsWithNamedSession() = false for an alias-squatting bead with a mismatched template, want true")
+	}
+}
+
+func TestFindCanonicalNamedSessionBead_AdoptsAliasMatchedPoolBead(t *testing.T) {
+	spec := NamedSessionSpec{
+		Agent:       &config.Agent{Name: "refinery", Dir: "gascity"},
+		Identity:    "gascity/refinery",
+		SessionName: "test-city--gascity--refinery",
+	}
+	candidates := []beads.Bead{
+		{
+			ID:     "pool-refinery",
+			Type:   BeadType,
+			Status: "open",
+			Labels: []string{LabelSession},
+			Metadata: map[string]string{
+				"alias":        "gascity/refinery",
+				"template":     "gascity/refinery",
+				"agent_name":   "gascity/refinery",
+				"session_name": "test-city--gascity--refinery-abc123",
+				"pool_managed": "true",
+			},
+		},
+	}
+	bead, ok := FindCanonicalNamedSessionBead(candidates, spec)
+	if !ok {
+		t.Fatal("FindCanonicalNamedSessionBead() = false, want adoption of alias-matched pool bead")
+	}
+	if bead.ID != "pool-refinery" {
+		t.Fatalf("FindCanonicalNamedSessionBead() = %q, want pool-refinery", bead.ID)
+	}
+}
+
+func TestLookupConfiguredNamedSession_AdoptsAliasMatchedPoolBead(t *testing.T) {
+	store := beads.NewMemStore()
+	spec := NamedSessionSpec{
+		Agent:       &config.Agent{Name: "refinery", Dir: "gascity"},
+		Identity:    "gascity/refinery",
+		SessionName: "test-city--gascity--refinery",
+	}
+	pool, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias":        "gascity/refinery",
+			"template":     "gascity/refinery",
+			"agent_name":   "gascity/refinery",
+			"session_name": "test-city--gascity--refinery-abc123",
+			"pool_managed": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(pool): %v", err)
+	}
+
+	lookup, err := LookupConfiguredNamedSession(store, spec)
+	if err != nil {
+		t.Fatalf("LookupConfiguredNamedSession: %v", err)
+	}
+	if lookup.HasConflict {
+		t.Fatalf("HasConflict = true (bead %q), want pool bead adopted as canonical", lookup.Conflict.ID)
+	}
+	if !lookup.HasCanonical {
+		t.Fatal("HasCanonical = false, want pool bead adopted as canonical")
+	}
+	if lookup.Canonical.ID != pool.ID {
+		t.Fatalf("Canonical.ID = %q, want pool bead %q", lookup.Canonical.ID, pool.ID)
+	}
+}
+
 func TestFindNamedSessionConflict_SelectsLiveNonCanonicalConflict(t *testing.T) {
 	spec := NamedSessionSpec{
 		Agent:       &config.Agent{Name: "worker", Dir: "myrig"},

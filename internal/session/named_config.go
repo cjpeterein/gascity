@@ -209,7 +209,12 @@ func BeadConflictsWithNamedSession(b beads.Bead, spec NamedSessionSpec) bool {
 		return !NamedSessionBeadMatchesSpec(b, spec)
 	}
 	if strings.TrimSpace(b.Metadata["alias"]) == spec.Identity {
-		return true
+		// A bead claiming the alias only conflicts when it backs a
+		// different template. An on_demand named session materialized
+		// via the ephemeral/pool path claims its own alias with the
+		// matching backing template and a suffixed session_name; it
+		// fulfills the identity rather than blocking it.
+		return !NamedSessionBeadMatchesSpec(b, spec)
 	}
 	return false
 }
@@ -289,17 +294,31 @@ func lookupConfiguredNamedSession(store beads.Store, spec NamedSessionSpec, incl
 		}
 	}
 
+	// An on_demand named session materialized via the ephemeral/pool path
+	// claims its own alias with the matching backing template but a suffixed
+	// session_name and no configured_named_session marker. None of the
+	// queries above surface it as canonical, so fetch alias matches and try
+	// canonical adoption before treating any of them as a conflict.
+	var aliasMatches []beads.Bead
+	if spec.Identity != "" {
+		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, "alias", spec.Identity)
+		if err != nil {
+			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing alias named session candidates: %w", err)
+		}
+		aliasMatches = matches
+		candidates = appendUniqueNamedSessionCandidates(candidates, seen, matches)
+		if bead, ok := FindCanonicalNamedSessionBead(candidates, spec); ok {
+			return ConfiguredNamedSessionLookup{Canonical: bead, HasCanonical: true}, nil
+		}
+	}
+
 	if !includeConflict {
 		return ConfiguredNamedSessionLookup{}, nil
 	}
 
 	conflictCandidates := append([]beads.Bead{}, runtimeSessionNameMatches...)
-	if spec.Identity != "" {
-		matches, err := listConfiguredNamedSessionBeadsByMetadata(store, "alias", spec.Identity)
-		if err != nil {
-			return ConfiguredNamedSessionLookup{}, fmt.Errorf("listing alias conflicts: %w", err)
-		}
-		conflictCandidates = appendUniqueNamedSessionCandidates(conflictCandidates, make(map[string]bool, len(conflictCandidates)+len(matches)), matches)
+	if len(aliasMatches) > 0 {
+		conflictCandidates = appendUniqueNamedSessionCandidates(conflictCandidates, make(map[string]bool, len(conflictCandidates)+len(aliasMatches)), aliasMatches)
 	}
 	if bead, conflict := FindNamedSessionConflict(conflictCandidates, spec); conflict {
 		return ConfiguredNamedSessionLookup{Conflict: bead, HasConflict: true}, nil
@@ -511,6 +530,14 @@ func FindCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpe
 		}
 		sn := strings.TrimSpace(b.Metadata["session_name"])
 		if sn == spec.SessionName || sn == identity {
+			return b, true
+		}
+		// An on_demand named session materialized via the ephemeral/pool
+		// path carries the matching backing template and claims its own
+		// alias, but its session_name is suffixed with the bead ID. Adopt
+		// it as canonical so the configured identity resolves to its own
+		// live process instead of self-conflicting on the alias.
+		if strings.TrimSpace(b.Metadata["alias"]) == identity {
 			return b, true
 		}
 	}

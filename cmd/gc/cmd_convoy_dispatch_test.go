@@ -4947,7 +4947,7 @@ func TestRunWorkflowServeFollowResetsBackoffForProcessedEventAndPending(t *testi
 	}
 	var waitCalls []waitCall
 	stopErr := fmt.Errorf("stop after sequence")
-	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int, _ workflowEventScope) (bool, error) {
 		waitCalls = append(waitCalls, waitCall{idleSweeps: idleSweeps, sleepDur: sleepDur})
 		switch len(waitCalls) {
 		case 1, 2, 3, 5:
@@ -5036,7 +5036,7 @@ func TestRunWorkflowServeFollowDrainsObservedWakeBeforeSurfacingWatcherErr(t *te
 
 	watcherErr := errors.New("event stream closed")
 	waitCalls := 0
-	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int, _ workflowEventScope) (bool, error) {
 		waitCalls++
 		if waitCalls == 1 {
 			// A relevant event was observed, then a fatal watcher error arrived
@@ -5107,7 +5107,7 @@ func TestRunWorkflowServeFollowSurvivesTransientWorkQueryTimeout(t *testing.T) {
 	})
 
 	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) { return ep, nil }
-	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int) (bool, error) {
+	workflowServeWaitForWake = func(_ <-chan workflowWatchResult, _ time.Duration, _ int, _ workflowEventScope) (bool, error) {
 		return false, nil
 	}
 
@@ -5155,6 +5155,173 @@ func TestWorkflowEventRelevantRejectsNonBeadEvents(t *testing.T) {
 	} {
 		if workflowEventRelevant(evt) {
 			t.Fatalf("workflowEventRelevant(%q) = true, want false", evt.Type)
+		}
+	}
+}
+
+func workflowBeadEventForScope(t *testing.T, evtType string, bead beads.Bead) events.Event {
+	t.Helper()
+	payload, err := json.Marshal(map[string]beads.Bead{"bead": bead})
+	if err != nil {
+		t.Fatalf("marshal bead payload: %v", err)
+	}
+	return events.Event{Type: evtType, Subject: bead.ID, Payload: payload}
+}
+
+func TestWorkflowEventScopeMatchAllAcceptsEveryBeadEvent(t *testing.T) {
+	scope := workflowEventScope{matchAll: true}
+	churn := workflowBeadEventForScope(t, events.BeadUpdated, beads.Bead{
+		ID:     "em-wisp-churn",
+		Title:  "order:nudge-on-route",
+		Labels: []string{"order-tracking"},
+	})
+	if !scope.relevant(churn) {
+		t.Fatal("matchAll scope must accept every bead lifecycle event")
+	}
+	if scope.relevant(events.Event{Type: events.SessionUpdated}) {
+		t.Fatal("matchAll scope must still reject non-bead events")
+	}
+}
+
+func TestNewWorkflowEventScopeCustomWorkQueryMatchesAll(t *testing.T) {
+	agent := config.Agent{Name: "custom", WorkQuery: "bd ready --json"}
+	scope := newWorkflowEventScope(agent)
+	if !scope.matchAll {
+		t.Fatal("a custom work_query must yield a matchAll scope so no work is dropped")
+	}
+}
+
+func TestWorkflowEventScopeFiltersUnrelatedOrderChurn(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "em-wisp-sess")
+	t.Setenv("GC_SESSION_NAME", "gascity--furiosa-em-wisp-sess")
+	t.Setenv("GC_ALIAS", "gascity/furiosa")
+	t.Setenv("GC_AGENT", "")
+	agent := config.Agent{Name: "polecat", Dir: "gascity", PoolName: "gascity/polecat"}
+	scope := newWorkflowEventScope(agent)
+
+	churn := workflowBeadEventForScope(t, events.BeadUpdated, beads.Bead{
+		ID:     "em-wisp-churn",
+		Title:  "order:nudge-on-route",
+		Labels: []string{"order-tracking"},
+	})
+	if scope.relevant(churn) {
+		t.Fatal("order-tracking churn (no assignee, no route metadata) must not wake a scoped polecat loop")
+	}
+
+	routed := workflowBeadEventForScope(t, events.BeadCreated, beads.Bead{
+		ID:       "gc-work",
+		Title:    "real work",
+		Metadata: map[string]string{"gc.routed_to": "gascity/polecat"},
+	})
+	if !scope.relevant(routed) {
+		t.Fatal("work routed to this agent's pool target must wake the loop")
+	}
+
+	assigned := workflowBeadEventForScope(t, events.BeadUpdated, beads.Bead{
+		ID:       "gc-work2",
+		Title:    "claimed work",
+		Assignee: "gascity--furiosa-em-wisp-sess",
+	})
+	if !scope.relevant(assigned) {
+		t.Fatal("work assigned to this loop's session must wake the loop")
+	}
+
+	otherRoute := workflowBeadEventForScope(t, events.BeadCreated, beads.Bead{
+		ID:       "gc-other",
+		Title:    "another rig's work",
+		Metadata: map[string]string{"gc.routed_to": "gastown.dog"},
+	})
+	if scope.relevant(otherRoute) {
+		t.Fatal("work routed to a different target must not wake this loop")
+	}
+
+	otherAssignee := workflowBeadEventForScope(t, events.BeadUpdated, beads.Bead{
+		ID:       "gc-other2",
+		Title:    "another agent's work",
+		Assignee: "gastown.deacon",
+	})
+	if scope.relevant(otherAssignee) {
+		t.Fatal("work assigned to a different agent must not wake this loop")
+	}
+}
+
+func TestWorkflowEventScopeMatchesLegacyRunTarget(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "em-wisp-sess")
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_ALIAS", "gascity/polecat")
+	t.Setenv("GC_AGENT", "")
+	agent := config.Agent{Name: "polecat", Dir: "gascity", PoolName: "gascity/polecat"}
+	scope := newWorkflowEventScope(agent)
+
+	legacy := workflowBeadEventForScope(t, events.BeadCreated, beads.Bead{
+		ID:    "gc-legacy",
+		Title: "legacy workflow root",
+		Metadata: map[string]string{
+			"gc.run_target": "gascity/polecat",
+			"gc.kind":       "workflow",
+		},
+	})
+	if !scope.relevant(legacy) {
+		t.Fatal("legacy gc.run_target+gc.kind=workflow demand must wake the matching pool loop")
+	}
+
+	nonWorkflow := workflowBeadEventForScope(t, events.BeadCreated, beads.Bead{
+		ID:       "gc-legacy2",
+		Title:    "run_target without workflow kind",
+		Metadata: map[string]string{"gc.run_target": "gascity/polecat"},
+	})
+	if scope.relevant(nonWorkflow) {
+		t.Fatal("gc.run_target without gc.kind=workflow is not routed demand and must not wake the loop")
+	}
+}
+
+func TestWorkflowEventScopeFailsOpenOnUndecodablePayload(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "em-wisp-sess")
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_ALIAS", "gascity/polecat")
+	t.Setenv("GC_AGENT", "")
+	agent := config.Agent{Name: "polecat", Dir: "gascity", PoolName: "gascity/polecat"}
+	scope := newWorkflowEventScope(agent)
+
+	for _, evt := range []events.Event{
+		{Type: events.BeadUpdated},
+		{Type: events.BeadUpdated, Payload: json.RawMessage(`{"bead":{}}`)},
+		{Type: events.BeadUpdated, Payload: json.RawMessage(`not json`)},
+	} {
+		if !scope.relevant(evt) {
+			t.Fatalf("scope must fail open (wake) on undecodable/empty payload: %q", string(evt.Payload))
+		}
+	}
+}
+
+func TestWorkflowEventScopeControlDispatcherWakesOnAnyRoutableDemand(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "em-wisp-ctl")
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+	agent := config.Agent{Name: config.ControlDispatcherAgentName}
+	scope := newWorkflowEventScope(agent)
+	if !scope.controlDispatcher {
+		t.Fatal("expected control dispatcher scope")
+	}
+
+	churn := workflowBeadEventForScope(t, events.BeadUpdated, beads.Bead{
+		ID:     "em-wisp-churn",
+		Title:  "order:nudge-on-route",
+		Labels: []string{"order-tracking"},
+	})
+	if scope.relevant(churn) {
+		t.Fatal("order-tracking churn carries no routing signal and must not wake the control dispatcher")
+	}
+
+	for _, bead := range []beads.Bead{
+		{ID: "gc-a", Metadata: map[string]string{"gc.routed_to": "gascity/polecat"}},
+		{ID: "gc-b", Assignee: "gastown.deacon"},
+		{ID: "gc-c", Metadata: map[string]string{"gc.run_target": "gascity/refinery", "gc.kind": "workflow"}},
+	} {
+		evt := workflowBeadEventForScope(t, events.BeadCreated, bead)
+		if !scope.relevant(evt) {
+			t.Fatalf("control dispatcher must wake on routable/assigned demand: %s", bead.ID)
 		}
 	}
 }
@@ -6312,6 +6479,76 @@ func TestWaitForRelevantWorkflowWakeDisabledDebounceDoesNotCoalesce(t *testing.T
 	}
 	if leftover := len(eventCh); leftover != 1 {
 		t.Fatalf("eventCh has %d buffered events, want 1 (disabled debounce must not drain the trailing event)", leftover)
+	}
+}
+
+func TestWaitForScopedWorkflowWakeIgnoresOutOfScopeChurnUntilMatch(t *testing.T) {
+	t.Setenv("GC_SESSION_ID", "em-wisp-sess")
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_ALIAS", "gascity/polecat")
+	t.Setenv("GC_AGENT", "")
+	scope := newWorkflowEventScope(config.Agent{Name: "polecat", Dir: "gascity", PoolName: "gascity/polecat"})
+
+	// An out-of-scope churn event ahead of the timer must NOT wake the loop.
+	churnCh := make(chan workflowWatchResult, 1)
+	churnCh <- workflowWatchResult{evt: workflowBeadEventForScope(t, events.BeadUpdated, beads.Bead{
+		ID:     "em-wisp-churn",
+		Title:  "order:nudge-on-route",
+		Labels: []string{"order-tracking"},
+	})}
+	eventWake, err := waitForScopedWorkflowWake(churnCh, 10*time.Millisecond, 2, scope)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if eventWake {
+		t.Fatal("out-of-scope order churn must fall through to the timer, not wake the loop")
+	}
+
+	// A routed-to-this-agent event must wake the loop.
+	workCh := make(chan workflowWatchResult, 1)
+	workCh <- workflowWatchResult{evt: workflowBeadEventForScope(t, events.BeadCreated, beads.Bead{
+		ID:       "gc-work",
+		Title:    "real work",
+		Metadata: map[string]string{"gc.routed_to": "gascity/polecat"},
+	})}
+	eventWake, err = waitForScopedWorkflowWake(workCh, time.Second, 2, scope)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !eventWake {
+		t.Fatal("routed work for this agent must wake the loop before the timer")
+	}
+}
+
+func TestWaitForScopedWorkflowWakeTraceDistinguishesIgnoreFromWake(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "workflow-trace.log")
+	t.Setenv("GC_WORKFLOW_TRACE", tracePath)
+	t.Setenv("GC_SESSION_ID", "em-wisp-sess")
+	t.Setenv("GC_SESSION_NAME", "")
+	t.Setenv("GC_ALIAS", "gascity/polecat")
+	t.Setenv("GC_AGENT", "")
+	scope := newWorkflowEventScope(config.Agent{Name: "polecat", Dir: "gascity", PoolName: "gascity/polecat"})
+
+	eventCh := make(chan workflowWatchResult, 1)
+	eventCh <- workflowWatchResult{evt: workflowBeadEventForScope(t, events.BeadUpdated, beads.Bead{
+		ID:     "em-wisp-churn",
+		Title:  "order:nudge-on-route",
+		Labels: []string{"order-tracking"},
+	})}
+	if _, err := waitForScopedWorkflowWake(eventCh, 5*time.Millisecond, 1, scope); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	trace := string(traceBytes)
+	if !strings.Contains(trace, "serve ignore-event type=bead.updated subject=em-wisp-churn") {
+		t.Fatalf("trace = %q, want ignore-event line for out-of-scope churn", trace)
+	}
+	if strings.Contains(trace, "serve wake-event") {
+		t.Fatalf("trace = %q, must not contain wake-event for out-of-scope churn", trace)
 	}
 }
 

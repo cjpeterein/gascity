@@ -498,7 +498,7 @@ func TestIsolateBdCwdEscapesAmbientRedirectAbove(t *testing.T) {
 
 	// Sanity: from `inner`, the ambient redirect above `outer` leaks into
 	// resolveBdScopeTarget and produces the "points outside" error.
-	if _, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}); err == nil ||
+	if _, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false); err == nil ||
 		!strings.Contains(err.Error(), "points outside declared city rigs") {
 		t.Fatalf("sanity check: expected ambient redirect to surface, got err=%v", err)
 	}
@@ -507,7 +507,7 @@ func TestIsolateBdCwdEscapesAmbientRedirectAbove(t *testing.T) {
 	// ancestors do not contain the outer redirect, so resolution falls
 	// back cleanly to the city scope.
 	isolateBdCwd(t)
-	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"}, false)
 	if err != nil {
 		t.Fatalf("resolveBdScopeTarget() after isolateBdCwd: error = %v", err)
 	}

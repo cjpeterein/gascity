@@ -372,6 +372,81 @@ func TestLoadCityCatalogIgnoresUnknownImplicitImport(t *testing.T) {
 	}
 }
 
+func TestLoadCityCatalogIncludesRepoCacheOwnedRoot(t *testing.T) {
+	// Not parallel: mutates GC_HOME via t.Setenv.
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	// Clear any test-isolation override so the cache root resolves under
+	// the GC_HOME we just set.
+	t.Setenv(config.RepoCacheRootEnv, "")
+
+	cat, err := LoadCityCatalog("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCacheRoot, absErr := filepath.Abs(filepath.Join(gcHome, "cache", "repos"))
+	if absErr != nil {
+		t.Fatal(absErr)
+	}
+	if !slices.Contains(cat.OwnedRoots, wantCacheRoot) {
+		t.Fatalf("OwnedRoots %v does not contain repo cache root %q", cat.OwnedRoots, wantCacheRoot)
+	}
+}
+
+// TestMaterializeRelinkStaleCacheSymlinkAfterImportFlip reproduces gc-e9b:
+// a per-agent skill sink symlink pointing at the OLD remote cache path
+// must self-heal once the import flips remote->local. Before the fix the
+// stale cache target was no longer under any owned root (OwnedRoots held
+// only the new local rig path), so cleanup misclassified the link as a
+// user-placed external symlink and skipped it — the link never relinked.
+func TestMaterializeRelinkStaleCacheSymlinkAfterImportFlip(t *testing.T) {
+	// Not parallel: mutates GC_HOME via t.Setenv.
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv(config.RepoCacheRootEnv, "")
+
+	// Old remote-cache location the stale sink symlink points at.
+	cacheSkills := filepath.Join(gcHome, "cache", "repos", "deadbeefhash", "skills")
+	mkSkill(t, cacheSkills, "debugging-gas-issues")
+
+	// New local rig source after the import flipped remote->local.
+	localRig := filepath.Join(t.TempDir(), "rig", "skills")
+	mkSkill(t, localRig, "debugging-gas-issues")
+
+	// City catalog now imports from the local rig path under binding
+	// "gc-debug", so the sink leaf is "gc-debug.debugging-gas-issues".
+	cat, err := LoadCityCatalog("", config.DiscoveredSkillCatalog{
+		SourceDir:   localRig,
+		BindingName: "gc-debug",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := filepath.Join(t.TempDir(), "claude", "skills")
+	if err := os.MkdirAll(sink, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	leaf := "gc-debug.debugging-gas-issues"
+	staleTarget := filepath.Join(cacheSkills, "debugging-gas-issues")
+	mustSymlink(t, staleTarget, filepath.Join(sink, leaf))
+
+	desired := EffectiveSet(cat, AgentCatalog{})
+	res, err := Run(Request{
+		SinkDir:    sink,
+		Desired:    desired,
+		OwnedRoots: cat.OwnedRoots,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Skipped) != 0 {
+		t.Fatalf("stale cache symlink was skipped instead of relinked: %+v", res.Skipped)
+	}
+	wantTarget := filepath.Join(localRig, "debugging-gas-issues")
+	checkSymlink(t, filepath.Join(sink, leaf), wantTarget)
+}
+
 func TestLoadAgentCatalogEmpty(t *testing.T) {
 	t.Parallel()
 	cat, err := LoadAgentCatalog("")

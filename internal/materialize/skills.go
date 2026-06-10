@@ -204,6 +204,14 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 	for _, catalog := range imported {
 		addRoot(catalog.SourceDir)
 	}
+	// The machine-local repo cache (~/.gc/cache/repos) is the resolution
+	// target for every remote import. Sink symlinks the materializer
+	// writes for a remote-sourced skill point under it; no user places a
+	// symlink there. Mark it owned so that when an import flips
+	// remote->local the now-stale cache-targeting symlink is recognized
+	// as ours and relinked instead of misclassified as external and
+	// skipped (gc-e9b).
+	addRoot(repoCacheOwnedRoot())
 	bootstrapDirs, err := bootstrapSkillDirs()
 	if err != nil {
 		return cat, err
@@ -660,6 +668,26 @@ func readSkillDir(root, origin string) ([]SkillEntry, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// repoCacheOwnedRoot returns the machine-local repo cache root to mark
+// as a gc-managed owned root, or "" when no cache root is in scope.
+//
+// Resolution honors the GC_REPO_CACHE_ROOT isolation override first
+// (so test harnesses that keep the real HOME still get a temp root),
+// then falls back to ImplicitGCHome()/cache/repos. ImplicitGCHome
+// returns "" under `go test` unless the test opts in via GC_HOME, which
+// keeps unit tests that do not set GC_HOME hermetic — matching the
+// existing bootstrapSkillDirs behavior.
+func repoCacheOwnedRoot() string {
+	if override := strings.TrimSpace(os.Getenv(config.RepoCacheRootEnv)); override != "" {
+		return override
+	}
+	gcHome := config.ImplicitGCHome()
+	if gcHome == "" {
+		return ""
+	}
+	return filepath.Join(gcHome, "cache", "repos")
 }
 
 // namedSkillsDir pairs a bootstrap pack name with its resolved skills/

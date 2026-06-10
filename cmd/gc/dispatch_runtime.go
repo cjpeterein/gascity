@@ -61,7 +61,7 @@ var (
 	workflowServeIdlePollAttempts  = 3
 	workflowServeWakeSweepInterval = 1 * time.Second
 	workflowServeMaxIdleSleep      = 30 * time.Second
-	workflowServeWaitForWake       = waitForRelevantWorkflowWakeWithTrace
+	workflowServeWaitForWake       = waitForScopedWorkflowWake
 	workflowTraceNow               = time.Now
 	// The trace helper is intentionally process-global because workflowTracef
 	// does not carry per-invocation context. Nested installs (serve ->
@@ -506,6 +506,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	eventCh := make(chan workflowWatchResult, 1)
 	go pumpWorkflowEvents(done, watcher, eventCh)
 
+	scope := newWorkflowEventScope(agentCfg)
 	idleSweeps := 0
 	for {
 		drainResult, err := drainWorkflowServeWork(agentCfg, cityPath, storePath, workQuery, workEnv, stderr)
@@ -537,7 +538,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 			drainResult.processedAny,
 			drainResult.pendingAny,
 		)
-		eventWake, err := workflowServeWaitForWake(eventCh, sleepDur, idleSweeps)
+		eventWake, err := workflowServeWaitForWake(eventCh, sleepDur, idleSweeps, scope)
 		if err != nil {
 			return err
 		}
@@ -572,12 +573,24 @@ func pumpWorkflowEvents(done <-chan struct{}, watcher events.Watcher, eventCh ch
 // waitForRelevantWorkflowWake blocks until either a relevant city event wakes
 // the --follow loop or sleepDur elapses. Returns eventWake=true on the event
 // path (so the caller can reset any idle-backoff counter), false when the
-// timer fires.
+// timer fires. This unscoped form matches every bead lifecycle event.
 func waitForRelevantWorkflowWake(eventCh <-chan workflowWatchResult, sleepDur time.Duration) (bool, error) {
 	return waitForRelevantWorkflowWakeWithTrace(eventCh, sleepDur, -1)
 }
 
+// waitForRelevantWorkflowWakeWithTrace is the unscoped, trace-aware wake that
+// matches every bead lifecycle event. The scoped serve loop uses
+// waitForScopedWorkflowWake; this wrapper preserves the prior contract for
+// callers (and tests) that do not narrow by work-query scope.
 func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int) (bool, error) {
+	return waitForScopedWorkflowWake(eventCh, sleepDur, idleSweeps, workflowEventScope{matchAll: true})
+}
+
+// waitForScopedWorkflowWake blocks until either a scope-relevant city event
+// wakes the --follow loop or sleepDur elapses. scope narrows which bead
+// lifecycle events count as relevant so unrelated bead churn (e.g. order-run
+// tracking wisps) no longer resets the loop's idle backoff (gc-6av).
+func waitForScopedWorkflowWake(eventCh <-chan workflowWatchResult, sleepDur time.Duration, idleSweeps int, scope workflowEventScope) (bool, error) {
 	timer := time.NewTimer(sleepDur)
 	defer timer.Stop()
 
@@ -587,7 +600,7 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 			if res.err != nil {
 				return false, res.err
 			}
-			if workflowEventRelevant(res.evt) {
+			if scope.relevant(res.evt) {
 				if idleSweeps >= 0 {
 					workflowTracef("serve wake-event type=%s subject=%s idle_sweeps=%d sleep=%s", res.evt.Type, res.evt.Subject, idleSweeps, sleepDur)
 				} else {
@@ -607,13 +620,151 @@ func waitForRelevantWorkflowWakeWithTrace(eventCh <-chan workflowWatchResult, sl
 	}
 }
 
-func workflowEventRelevant(evt events.Event) bool {
+// isWorkflowBeadLifecycleEvent reports whether evt is a bead create/update/close
+// event — the only event class the serve loop's work query can be affected by.
+func isWorkflowBeadLifecycleEvent(evt events.Event) bool {
 	switch evt.Type {
 	case events.BeadCreated, events.BeadClosed, events.BeadUpdated:
 		return true
 	default:
 		return false
 	}
+}
+
+// workflowEventRelevant reports whether evt is a bead lifecycle event the serve
+// loop must react to at all. It is the type-only gate; subject/payload scoping
+// is layered on top by workflowEventScope.relevant so an unscoped caller (the
+// 2-arg wake wrapper, tests) keeps the historical "any bead event wakes the
+// loop" behavior.
+func workflowEventRelevant(evt events.Event) bool {
+	return isWorkflowBeadLifecycleEvent(evt)
+}
+
+// workflowEventScope narrows bead lifecycle events to the ones whose payload
+// bead could plausibly satisfy this serve loop's work query. Without it the
+// loop wakes on every bead.* event in the city — including the high-rate
+// order-run tracking wisp lifecycle churn that carries no assignee and no
+// routing metadata — which resets the idle backoff (gc-6av) and pins the bead
+// store under the repeated assembly query.
+//
+// The scope fails OPEN: when matchAll is set, when the event carries no
+// decodable bead payload, or (per-agent mode) when the bead carries no
+// classifiable scope signal, the event is treated as relevant. Dropping a real
+// work event is far worse than an occasional spurious wake, so scoping only
+// filters events it can positively prove are out of this loop's reach.
+type workflowEventScope struct {
+	// matchAll preserves the legacy "every bead event is relevant" behavior.
+	// It is set when the loop's match set is unknown (custom work_query) or for
+	// unscoped callers.
+	matchAll bool
+	// controlDispatcher marks the city-wide control dispatcher, which spawns
+	// for any routable or assigned demand across the city rather than a single
+	// route target.
+	controlDispatcher bool
+	// assignees is the set of identities the assigned tiers of the work query
+	// match (session id, session name, alias, agent, qualified name).
+	assignees map[string]struct{}
+	// routes is the set of gc.routed_to / gc.run_target values the routed
+	// (pool) tier of the work query matches.
+	routes map[string]struct{}
+}
+
+// newWorkflowEventScope builds the relevance scope for agentCfg's serve loop.
+// A custom work_query (whose match set the SDK cannot introspect) or the
+// absence of any identifying signal yields a matchAll scope so the loop never
+// silently drops work it would have claimed.
+func newWorkflowEventScope(agentCfg config.Agent) workflowEventScope {
+	if strings.TrimSpace(agentCfg.WorkQuery) != "" {
+		return workflowEventScope{matchAll: true}
+	}
+	scope := workflowEventScope{
+		controlDispatcher: isWorkflowServeControlDispatcherAgent(agentCfg),
+		assignees:         map[string]struct{}{},
+		routes:            map[string]struct{}{},
+	}
+	for _, env := range []string{"GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS", "GC_AGENT"} {
+		if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+			scope.assignees[v] = struct{}{}
+		}
+	}
+	if q := strings.TrimSpace(agentCfg.QualifiedName()); q != "" {
+		scope.assignees[q] = struct{}{}
+	}
+	for _, route := range agentCfg.RouteTargets() {
+		if r := strings.TrimSpace(route); r != "" {
+			scope.routes[r] = struct{}{}
+		}
+	}
+	return scope
+}
+
+// relevant reports whether evt should wake this serve loop. It first applies
+// the type gate, then narrows by the bead payload as described on
+// workflowEventScope.
+func (s workflowEventScope) relevant(evt events.Event) bool {
+	if !isWorkflowBeadLifecycleEvent(evt) {
+		return false
+	}
+	if s.matchAll {
+		return true
+	}
+	bead, ok := decodeWorkflowEventBead(evt)
+	if !ok {
+		// Undecodable or absent payload: cannot prove out-of-scope, so wake.
+		return true
+	}
+	if bead.Assignee != "" {
+		if _, ok := s.assignees[bead.Assignee]; ok {
+			return true
+		}
+	}
+	routed := strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey])
+	runTarget := strings.TrimSpace(bead.Metadata[beadmeta.RunTargetMetadataKey])
+	workflowKind := strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])
+	if s.controlDispatcher {
+		// The control dispatcher serves all routable/assigned demand across the
+		// city. Only churn carrying no routing signal at all (order-tracking
+		// wisps: no assignee, no route metadata) is out of scope.
+		return bead.Assignee != "" || routed != "" || (runTarget != "" && workflowKind == "workflow")
+	}
+	if routed != "" {
+		if _, ok := s.routes[routed]; ok {
+			return true
+		}
+	}
+	if runTarget != "" && workflowKind == "workflow" {
+		if _, ok := s.routes[runTarget]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// decodeWorkflowEventBead extracts the bead snapshot from a bead lifecycle
+// event payload. It accepts both the current {"bead": ...} envelope and the
+// legacy raw-bead shape emitted by older bd hook scripts. The second return is
+// false when no usable payload is present (empty payload, or a decode that
+// yields no bead id), signaling the caller to fail open.
+func decodeWorkflowEventBead(evt events.Event) (beads.Bead, bool) {
+	raw := evt.Payload
+	if len(raw) == 0 {
+		return beads.Bead{}, false
+	}
+	var wrapped struct {
+		Bead json.RawMessage `json:"bead"`
+	}
+	beadJSON := raw
+	if err := json.Unmarshal(raw, &wrapped); err == nil && len(wrapped.Bead) > 0 {
+		beadJSON = wrapped.Bead
+	}
+	var bead beads.Bead
+	if err := json.Unmarshal(beadJSON, &bead); err != nil {
+		return beads.Bead{}, false
+	}
+	if bead.ID == "" {
+		return beads.Bead{}, false
+	}
+	return bead, true
 }
 
 func workflowServeQuery(workQuery string) string {

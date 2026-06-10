@@ -30,7 +30,11 @@ const (
 
 type nudgeReference = nudgequeue.Reference
 
-func openNudgeBeadStore(cityPath string) beads.Store {
+// openNudgeBeadStore is a var so tests can count or stub store opens. Each
+// call opens a fresh backend store; long-lived callers must open once and
+// pass the store through the queue helpers instead of re-opening per call,
+// or backend connections accumulate for the life of the process.
+var openNudgeBeadStore = func(cityPath string) beads.Store {
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {
 		return nil

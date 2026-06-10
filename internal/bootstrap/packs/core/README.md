@@ -41,12 +41,21 @@ carries a non-empty `metadata.gc.routed_to`, nudges that target with
 `routed_to` may be a concrete session **or** a pool base. Sling collapses a
 multi-session slot to the pool base (`NormalizePoolRouteTarget`), so a
 pool-routed bead's `routed_to` is the members' `template`, not a name
-`gc session nudge` can resolve. The script handles both: it enumerates the
-pool's active members via `gc session list --template <routed_to>` and nudges
-each, falling back to a direct `gc session nudge <routed_to>` when the target
-has no members (a single-session agent or an explicit slot). Without this,
-nudges to a pool base silently no-op — defeating the warm-idle pool wake this
-order exists to provide.
+`gc session nudge` can resolve. The script snapshots
+`gc session list --state active` once per run and matches each target against
+it: active templates first (pool fan-out; single-session agents carry their
+own name as template), then active session names/aliases (explicit slot or
+agent targets). Without this, nudges to a pool base silently no-op —
+defeating the warm-idle pool wake this order exists to provide.
+
+**Dormant targets are skipped, not nudged.** A `gc session nudge` at a target
+with no active session queues a session-fenced nudge that can never deliver;
+it strands in the queue (and its wisp bead in every ready projection) until
+the 24h TTL. Waking dormant targets is the controller's job — routed demand
+wakes pools via scale-check counts and named sessions via demand checks, and
+a freshly spawned session reads its hook at startup. A skipped pair records
+no dedup state, so it is re-evaluated (and nudged) once the target has an
+active session and the routing is still emitting events.
 
 **Idempotence.** A `(bead, routed_to)` pair is nudged at most once. The
 reconciler re-emits `bead.updated` for an actively-routed bead, so the dedup

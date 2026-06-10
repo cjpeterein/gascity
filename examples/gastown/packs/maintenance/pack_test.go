@@ -130,9 +130,29 @@ func TestNudgeOnRouteResolvesPoolMembers(t *testing.T) {
 		t.Fatalf("reading nudge-on-route.sh: %v", err)
 	}
 	body := string(data)
-	for _, want := range []string{"gc session list", "--template"} {
+	for _, want := range []string{"gc session list", "--state active", ".template == $t"} {
 		if !strings.Contains(body, want) {
-			t.Errorf("nudge-on-route.sh must resolve pool members; missing %q", want)
+			t.Errorf("nudge-on-route.sh must resolve pool members from the active session list; missing %q", want)
 		}
+	}
+}
+
+// TestNudgeOnRouteSkipsDormantTargets guards gc-i4s: a routed target with no
+// active session must be skipped, not nudged. `gc session nudge` at a dormant
+// target queues a session-fenced nudge that can never deliver — it strands in
+// the queue (and its wisp bead in every ready projection) until the 24h TTL.
+// Demand-driven wake (ScaleCheck counts, named-session demand) owns dormant
+// targets; the startup work query picks up routed work when a session spawns.
+func TestNudgeOnRouteSkipsDormantTargets(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/nudge-on-route.sh")
+	if err != nil {
+		t.Fatalf("reading nudge-on-route.sh: %v", err)
+	}
+	body := string(data)
+	if strings.Contains(body, `gc session nudge "$_target"`) {
+		t.Error("nudge-on-route.sh must not nudge a routed target without an active-session match; queued nudges at dormant targets strand until TTL")
+	}
+	if !strings.Contains(body, "no active session") {
+		t.Error(`nudge-on-route.sh must skip dormant targets; missing the "no active session" skip path`)
 	}
 }

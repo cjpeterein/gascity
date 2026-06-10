@@ -1817,6 +1817,37 @@ func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	}
 }
 
+// TestEphemeralWispScansAreBounded guards gc-i4s: the `bd query
+// ephemeral=true` scans embedded in generated work-query and lifecycle-hook
+// scripts must carry a finite --limit. Unbounded scans (--limit=0) made every
+// stranded wisp fatten every hook evaluation in the city.
+func TestEphemeralWispScansAreBounded(t *testing.T) {
+	worker := Agent{Name: "worker", Dir: "hello-world"}
+	pooled := Agent{
+		Name:              "dog-1",
+		Dir:               "hello-world",
+		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		PoolName: "hello-world/dog",
+	}
+	boundedScan := `ephemeral=true AND status=`
+	surfaces := map[string]string{
+		"EffectiveWorkQuery":                worker.EffectiveWorkQuery(),
+		"EffectiveWorkQueryForBeads(bd105)": worker.EffectiveWorkQueryForBeads(BeadsConfig{BDCompatibility: BeadsBDCompatibility105}),
+		"EffectiveAssignedInProgressQuery":  worker.EffectiveAssignedInProgressQuery(),
+		"EffectiveAssignedReadyQuery":       worker.EffectiveAssignedReadyQuery(),
+		"EffectivePoolDemandQuery":          pooled.EffectivePoolDemandQuery(),
+		"EffectiveOnDeath":                  pooled.EffectiveOnDeath(),
+	}
+	for name, got := range surfaces {
+		if strings.Contains(got, "--limit=0") {
+			t.Errorf("%s emits an unbounded wisp scan (--limit=0): %q", name, got)
+		}
+		if strings.Contains(got, boundedScan) && !strings.Contains(got, "--limit=200") {
+			t.Errorf("%s embeds a wisp scan without the bounded limit: %q", name, got)
+		}
+	}
+}
+
 func TestEffectiveWorkQueryBD104SurfacesLegacyEphemeralRoutedWork(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "foundations"}
 	bdScript := `#!/bin/sh
@@ -5986,7 +6017,7 @@ case "$1" in
     ;;
 esac
 `)
-	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=200") {
 		t.Fatalf("hook log = %q, want ephemeral in-progress query", log)
 	}
 	if !strings.Contains(log, "update ga-ephemeral-death --assignee  --status open --set-metadata gc.run_target=hello-world/dog") {
@@ -6021,7 +6052,7 @@ case "$1" in
     ;;
 esac
 `)
-	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=200") {
 		t.Fatalf("hook log = %q, want legacy ephemeral in-progress query", log)
 	}
 	if !strings.Contains(log, "update ga-legacy-ephemeral-death --assignee  --status open --set-metadata gc.run_target=hello-world/dog") {
@@ -6161,7 +6192,7 @@ case "$1" in
     ;;
 esac
 `)
-	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=200") {
 		t.Fatalf("hook log = %q, want ephemeral in-progress query", log)
 	}
 	if !strings.Contains(log, "update ga-ephemeral-boot --status open") {
@@ -6196,7 +6227,7 @@ case "$1" in
     ;;
 esac
 `)
-	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=0") {
+	if !strings.Contains(log, "query --json ephemeral=true AND status=in_progress --limit=200") {
 		t.Fatalf("hook log = %q, want legacy ephemeral in-progress query", log)
 	}
 	if !strings.Contains(log, "update ga-legacy-ephemeral-boot --status open") {

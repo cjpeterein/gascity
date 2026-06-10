@@ -3314,8 +3314,19 @@ func poolDemandMigrationFilterJQ(limit int) string {
 	return shellquote.Join([]string{"jq", filter})
 }
 
+// ephemeralWispScanLimit bounds the `bd query ephemeral=true` scans embedded
+// in generated work-query and lifecycle-hook scripts. The scans were
+// previously unbounded (--limit=0), so every stranded wisp in the city
+// fattened every hook evaluation (gc-i4s: 85 stranded nudge wisps scanned by
+// 4-6 bd invocations per evaluation). bd query returns newest-first by
+// default and the downstream jq filters re-check every predicate inside the
+// page, so the bound only changes results when more open wisps than this
+// exist — a pathology the bound exists to keep cheap. Mirrors the bounded
+// wisps-page precedent in beads.BdStore.listEphemeral.
+const ephemeralWispScanLimit = 200
+
 func bdQueryEphemeralStatusShell(status string) string {
-	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
+	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=` + strconv.Itoa(ephemeralWispScanLimit)
 }
 
 func bdQueryEphemeralStatusQuietShell(status string) string {

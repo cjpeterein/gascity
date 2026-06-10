@@ -3708,14 +3708,17 @@ func TestExpandedCityUsesGastownDogOverride(t *testing.T) {
 	if !strings.HasSuffix(dog.OverlayDir, wantOverlaySuffix) {
 		t.Errorf("dog overlay_dir = %q, want suffix %q", dog.OverlayDir, wantOverlaySuffix)
 	}
-	if len(dog.SessionLive) != 2 {
-		t.Fatalf("dog session_live has %d entries, want 2 gastown theming commands", len(dog.SessionLive))
+	if len(dog.SessionLive) != 3 {
+		t.Fatalf("dog session_live has %d entries, want 3 gastown theming commands", len(dog.SessionLive))
 	}
 	if !strings.Contains(dog.SessionLive[0], "tmux-theme.sh") {
 		t.Errorf("dog session_live[0] = %q, want tmux-theme.sh", dog.SessionLive[0])
 	}
 	if !strings.Contains(dog.SessionLive[1], "tmux-keybindings.sh") {
 		t.Errorf("dog session_live[1] = %q, want tmux-keybindings.sh", dog.SessionLive[1])
+	}
+	if !strings.Contains(dog.SessionLive[2], "status-updater.sh") {
+		t.Errorf("dog session_live[2] = %q, want status-updater.sh", dog.SessionLive[2])
 	}
 }
 

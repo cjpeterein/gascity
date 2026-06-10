@@ -23,6 +23,7 @@ source = "../maintenance"
 session_live = [
     "{{.ConfigDir}}/assets/scripts/tmux-theme.sh {{.Session}} {{.Agent}} {{.ConfigDir}}",
     "{{.ConfigDir}}/assets/scripts/tmux-keybindings.sh {{.ConfigDir}}",
+    "{{.ConfigDir}}/assets/scripts/status-updater.sh {{.Session}} {{.Agent}} {{.ConfigDir}}",
 ]
 
 [[patches.agent]]

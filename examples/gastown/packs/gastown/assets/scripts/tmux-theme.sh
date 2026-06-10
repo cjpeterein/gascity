@@ -14,7 +14,9 @@
 # the separator rather than role names lets this script work for any pack,
 # including custom packs whose role taxonomy differs from gastown's. Same
 # pattern as cycle.sh (#1571) and bind-key.sh (#1573).
-SESSION="$1" AGENT="$2" CONFIGDIR="$3"
+# $3 (config-dir) is still accepted for caller compatibility but unused:
+# status-right no longer references pack scripts (gc-46q).
+SESSION="$1" AGENT="$2"
 
 # Socket-aware tmux command (uses GC_TMUX_SOCKET when set).
 gcmux() { tmux ${GC_TMUX_SOCKET:+-L "$GC_TMUX_SOCKET"} "$@"; }
@@ -50,7 +52,18 @@ gcmux set-option -t "$SESSION" status-left-length 25
 gcmux set-option -t "$SESSION" status-left "$icon $AGENT "
 gcmux set-option -t "$SESSION" status-right-length 80
 gcmux set-option -t "$SESSION" status-interval 5
-gcmux set-option -t "$SESSION" status-right "#($CONFIGDIR/assets/scripts/status-line.sh $AGENT) %H:%M"
+
+# Render path is a pure in-server option read — no #() shellouts. tmux
+# re-renders the status bar on pane activity at an unbounded rate, so any
+# command here would run arbitrarily often (gc-46q). The status-updater.sh
+# session_live sidecar refreshes @gc_status_line at a bounded cadence.
+gcmux set-option -t "$SESSION" status-right "#{@gc_status_line} %H:%M"
+
+# Seed the identity segment so the bar is never blank before the first
+# updater tick. Only when unset: re-theming (the reconciler re-applies
+# session_live on drift) must not clobber updater-produced content.
+cur=$(gcmux show-options -t "$SESSION" -qv @gc_status_line 2>/dev/null)
+[ -z "$cur" ] && gcmux set-option -t "$SESSION" @gc_status_line "$AGENT"
 
 # Mouse + clipboard.
 gcmux set-option -t "$SESSION" mouse on

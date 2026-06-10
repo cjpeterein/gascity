@@ -1,8 +1,10 @@
 #!/bin/sh
-# status-line.sh — tmux status-right helper for Gas City agents.
+# status-line.sh — status text producer for Gas City agents.
 # Usage: status-line.sh <agent-name>
-# Called by tmux every status-interval seconds via #(command).
-# Always exits 0 — tmux must never see errors.
+# Called by the status-updater.sh sidecar at a bounded cadence; the text is
+# published to the @gc_status_line session option that status-right reads
+# (gc-46q: data production stays off the tmux render path).
+# Always exits 0 — callers must never see errors.
 
 agent="$1"
 [ -z "$agent" ] && exit 0
@@ -30,8 +32,8 @@ fi
 # a standard dependency of the gastown pack scripts that parse gc/bd JSON.
 w=$(gc hook "$agent" 2>/dev/null | jq 'length' 2>/dev/null || true)
 
-# Count unread mail (first word of gc mail check output is the count).
-m=$(gc mail check "$agent" 2>/dev/null | awk '{print $1+0}' || true)
+# Count unread mail via the count-only endpoint (cheaper than mail check).
+m=$(gc mail count "$agent" --json 2>/dev/null | jq -r '.unread // 0' 2>/dev/null || echo 0)
 
 # Format: agent | hook-icon N | mail-icon N  (omit segments that are 0)
 printf '%s' "$agent"

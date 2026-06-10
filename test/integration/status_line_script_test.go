@@ -43,9 +43,9 @@ func runStatusLine(t *testing.T, agent, hookOutput string, hookExit int, mailOut
 }
 
 // writeFakeGCForStatusLine writes a fake `gc` that responds to `gc hook
-// <agent>` and `gc mail check <agent>` with canned output and exit codes,
-// mirroring the real CLI's contract (hook prints a JSON array; mail check
-// prints "<count> unread message(s) ...").
+// <agent>` and `gc mail count <agent> --json` with canned output and exit
+// codes, mirroring the real CLI's contract (hook prints a JSON array; mail
+// count prints {"total":N,"unread":N}).
 func writeFakeGCForStatusLine(t *testing.T, path, hookOutput string, hookExit int, mailOutput string, mailExit int) {
 	t.Helper()
 
@@ -61,7 +61,7 @@ case "$cmd" in
     exit %d
     ;;
   mail)
-    # real CLI: "gc mail check <agent>"
+    # real CLI: "gc mail count <agent> --json"
     printf '%%s' %q
     exit %d
     ;;
@@ -114,11 +114,11 @@ func TestStatusLineNonEmptyHookRendersCount(t *testing.T) {
 	}
 }
 
-// TestStatusLineMailSegmentStillRenders confirms the fix did not disturb
-// the mail segment: a non-zero unread count is parsed from the first word
-// of `gc mail check` output and rendered as a mail badge.
+// TestStatusLineMailSegmentStillRenders confirms the mail segment renders
+// from the count-only endpoint: the unread field of `gc mail count --json`
+// drives the mail badge.
 func TestStatusLineMailSegmentStillRenders(t *testing.T) {
-	out := runStatusLine(t, "mayor", "[]", 1, "2 unread message(s) for mayor\n", 0)
+	out := runStatusLine(t, "mayor", "[]", 1, `{"total":3,"unread":2}`, 0)
 	if strings.Contains(out, "🪝") {
 		t.Fatalf("empty hook rendered a hook badge alongside mail: %q", out)
 	}
@@ -130,7 +130,7 @@ func TestStatusLineMailSegmentStillRenders(t *testing.T) {
 // TestStatusLineHookAndMailTogether exercises both segments at once.
 func TestStatusLineHookAndMailTogether(t *testing.T) {
 	hook := `[{"id":"a"},{"id":"b"}]`
-	out := runStatusLine(t, "deacon", hook, 0, "5 unread message(s) for deacon\n", 0)
+	out := runStatusLine(t, "deacon", hook, 0, `{"total":5,"unread":5}`, 0)
 	if !strings.Contains(out, "🪝 2") {
 		t.Fatalf("hook segment rendered %q, want '🪝 2'", out)
 	}

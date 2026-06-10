@@ -659,4 +659,118 @@ func TestReconcileSessionBeads_RestartRequestNamedAlwaysWakesSameTick(t *testing
 	}
 }
 
+// newLiveAPIErrorSession builds an alive (non-zombie) session whose pane is
+// parked at the idle prompt after the agent loop dead-ended on an
+// unrecoverable in-loop API 400 (the gc-hb2 resume model-name reject). The
+// session is NOT restart_requested — the reconciler must detect the wedge
+// itself.
+func newLiveAPIErrorSession(t *testing.T, paneContent string) (*restartRequestTestEnv, beads.Bead, string) {
+	t.Helper()
+	env := newRestartRequestTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "active",
+		"session_key":                "poisoned-resume-key",
+		"started_config_hash":        "hash-before-reject",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	env.sp.SetPeekOutput(sessionName, paneContent)
+	return env, session, sessionName
+}
+
+// TestReconcileSessionBeads_LiveAPIErrorWedgeForcesFreshRestart pins the gc-hb2
+// fix: a LIVE pane stuck on an in-loop API 400 (resume model-name reject) is
+// invisible to the crash/rate-limit/churn gates because they all require
+// alive==false. The reconciler must detect the parked API-error screen on the
+// live pane and route it through the fresh-restart machinery: stop the runtime
+// and clear started_config_hash so the next launch uses --session-id (a brand
+// new conversation) instead of re-firing the poisoned --resume.
+func TestReconcileSessionBeads_LiveAPIErrorWedgeForcesFreshRestart(t *testing.T) {
+	idlePrompt := "╭────────────────╮\n│ ❯                  │\n╰────────────────╯"
+	paneContent := "API Error: 400 {'error': 'anthropic_messages: Invalid model name passed in model=claude-opus-4-8'}\n" + idlePrompt
+	env, session, sessionName := newLiveAPIErrorSession(t, paneContent)
+
+	env.reconcile([]beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running; live API-error wedge should be stopped for fresh restart", sessionName)
+	}
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["started_config_hash"] != "" {
+		t.Fatalf("started_config_hash = %q, want cleared so next launch uses --session-id not --resume", got.Metadata["started_config_hash"])
+	}
+	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "poisoned-resume-key" {
+		t.Fatalf("session_key = %q, want rotated to a fresh conversation key", got.Metadata["session_key"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "true" {
+		t.Fatalf("continuation_reset_pending = %q, want true", got.Metadata["continuation_reset_pending"])
+	}
+}
+
+// TestReconcileSessionBeads_LiveTransientAPIErrorIsNotRestarted ensures a live
+// pane showing a transient/retryable API error (429/5xx), which the agent loop
+// will retry on its own, is NOT force-restarted. Only deterministic 4xx wedges
+// that cannot self-clear qualify.
+func TestReconcileSessionBeads_LiveTransientAPIErrorIsNotRestarted(t *testing.T) {
+	idlePrompt := "╭────────────────╮\n│ ❯                  │\n╰────────────────╯"
+	paneContent := "API Error: 529 {'error': {'type': 'overloaded_error'}}\n" + idlePrompt
+	env, session, sessionName := newLiveAPIErrorSession(t, paneContent)
+
+	env.reconcile([]beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q stopped; a transient API error must not trigger a fresh restart", sessionName)
+	}
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["continuation_reset_pending"] == "true" {
+		t.Fatal("continuation_reset_pending = true; a transient API error must not apply a restart patch")
+	}
+	if got.Metadata["restart_requested"] == "true" {
+		t.Fatal("restart_requested = true; a transient API error must not request a fresh restart")
+	}
+}
+
+// TestReconcileSessionBeads_LiveAPIErrorAttachedSessionIsNotRestarted ensures a
+// human-attached session is never force-restarted on an API-error wedge.
+// Restarting an attached crew/interactive session would discard the operator's
+// live conversation, so attachment must veto the recovery.
+func TestReconcileSessionBeads_LiveAPIErrorAttachedSessionIsNotRestarted(t *testing.T) {
+	idlePrompt := "╭────────────────╮\n│ ❯                  │\n╰────────────────╯"
+	paneContent := "API Error: 400 {'error': 'anthropic_messages: Invalid model name passed in model=claude-opus-4-8'}\n" + idlePrompt
+	env, session, sessionName := newLiveAPIErrorSession(t, paneContent)
+	env.sp.SetAttached(sessionName, true)
+
+	env.reconcile([]beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q stopped; an attached session must not be force-restarted on an API-error wedge", sessionName)
+	}
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["continuation_reset_pending"] == "true" {
+		t.Fatal("continuation_reset_pending = true; an attached session must not have a restart patch applied")
+	}
+}
+
 func restartRequestTestIntPtr(n int) *int { return &n }

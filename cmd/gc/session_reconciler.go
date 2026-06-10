@@ -506,6 +506,17 @@ func freshRestartSessionKey(tp TemplateParams, meta map[string]string) (string, 
 	return newKey, true
 }
 
+// sessionMayRelaunchOnResume reports whether the next launch of this session
+// would use the provider's resume path (e.g. `--resume <key>`) rather than a
+// fresh `--session-id` start. resolveSessionCommand resumes only when the bead
+// carries both a session_key and a non-empty started_config_hash (i.e. not a
+// first start). This is the precondition for the gc-hb2 live-pane resume wedge:
+// a session with no resume key cannot be relaunched onto a poisoned `--resume`.
+func sessionMayRelaunchOnResume(session beads.Bead) bool {
+	return strings.TrimSpace(session.Metadata["session_key"]) != "" &&
+		strings.TrimSpace(session.Metadata["started_config_hash"]) != ""
+}
+
 // allDependenciesAliveForTemplate checks that all template dependencies of a
 // resolved logical template have at least one alive instance. Uses the
 // runtime.Provider directly instead of agent types for liveness checks.
@@ -1652,6 +1663,49 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					session.Metadata["restart_requested"] = "true"
 					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, threshold) //nolint:errcheck
+				}
+			}
+		}
+
+		// Live-pane API-error wedge (gc-hb2): a session whose process is
+		// still ALIVE but whose agent loop dead-ended on an unrecoverable
+		// in-loop API 4xx — most often a `--resume` model-name reject — is
+		// invisible to the crash/rate-limit/churn gates below, all of which
+		// require alive==false. Every relaunch rebuilds the same poisoned
+		// `--resume` and re-hits the error. Detect the parked API-error
+		// screen on the live pane and set restart_requested so the block
+		// below stops the runtime and clears started_config_hash; the next
+		// launch then uses --session-id (a fresh conversation), which is the
+		// manual `gc session reset` fix made automatic.
+		//
+		// The cheap metadata pre-gate keeps this off the desired fast path:
+		// only a session that WILL relaunch onto `--resume` can be wedged this
+		// way, and resolveSessionCommand emits `--resume` only when both
+		// session_key and started_config_hash are set (otherwise it first-starts
+		// with `--session-id` or runs the bare command). Sessions outside that
+		// set are skipped before any pane peek, so a healthy session is never
+		// probed here. Subprocess (one-shot), draining, pending-create, and
+		// human-attached sessions are also excluded.
+		if alive && sessionMayRelaunchOnResume(*session) &&
+			(cfg == nil || cfg.Session.Provider != "subprocess") &&
+			session.Metadata["restart_requested"] != "true" &&
+			(dt == nil || dt.get(session.ID) == nil) &&
+			!pendingCreateStartInFlight(*session, clk, startupTimeout) {
+			if content, err := peek(rateLimitPeekLines); err == nil && runtime.ContainsInLoopAPIErrorScreen(content) {
+				attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)
+				if attachErr != nil {
+					// Fail safe: an unreadable attachment check must not
+					// recycle a session a human may be attached to.
+					fmt.Fprintf(stderr, "session reconciler: checking attachment before live API-error restart for %s: %v\n", name, attachErr) //nolint:errcheck
+				} else if !attached {
+					if session.Metadata == nil {
+						session.Metadata = map[string]string{}
+					}
+					session.Metadata["restart_requested"] = "true"
+					fmt.Fprintf(stderr, "session reconciler: %s wedged on in-loop API error (live pane); requesting fresh restart\n", name) //nolint:errcheck
+					if trace != nil {
+						trace.recordDecision(string(TraceSiteReconcilerAPIErrorWedge), tp.TemplateName, name, "live_api_error", "restart_requested", nil, nil, "")
+					}
 				}
 			}
 		}

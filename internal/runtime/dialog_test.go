@@ -932,6 +932,48 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 	}
 }
 
+func TestContainsInLoopAPIErrorScreen(t *testing.T) {
+	t.Parallel()
+	// A claude-code pane parked at the idle prompt after the agent loop
+	// dead-ended on an unrecoverable resume model-name reject. This is the
+	// gc-hb2 wedge: the pane stays ALIVE so crash recovery never fires.
+	idlePrompt := "╭────────────────╮\n│ ❯                  │\n╰────────────────╯"
+	modelReject := "API Error: 400 {'error': 'anthropic_messages: Invalid model name passed in model=claude-opus-4-8'}\n" + idlePrompt
+	invalidRequest := "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad request\"}}\n" + idlePrompt
+	notFound := "API Error: 404 model not found\n" + idlePrompt
+
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{name: "resume model-name reject at idle prompt", content: modelReject, want: true},
+		{name: "invalid_request_error at idle prompt", content: invalidRequest, want: true},
+		{name: "404 model not found at idle prompt", content: notFound, want: true},
+		// Transient/retryable failures self-clear; the agent loop retries them,
+		// so a fresh restart would be premature. They are not our wedge.
+		{name: "429 rate limit is not our wedge", content: "API Error: 429 rate_limit_error\n" + idlePrompt, want: false},
+		{name: "500 server error is transient", content: "API Error: 500 internal server error\n" + idlePrompt, want: false},
+		{name: "overloaded is transient", content: "API Error: 529 overloaded_error\n" + idlePrompt, want: false},
+		// A live error banner with no idle prompt means the loop is still
+		// running (mid-retry / streaming) — not parked, so not stuck.
+		{name: "400 reject without idle prompt", content: modelReject[:strings.IndexByte(modelReject, '\n')], want: false},
+		// A healthy agent that merely printed the error text as part of its
+		// own output (e.g. reading this bead) and is still working must not
+		// be force-restarted. Without the idle prompt it is not a match.
+		{name: "error text quoted mid-turn", content: "I see the bug: API Error: 400 Invalid model name passed.\nLet me investigate the reconciler.", want: false},
+		{name: "normal output", content: "Hello world\n" + idlePrompt, want: false},
+		{name: "empty", content: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ContainsInLoopAPIErrorScreen(tt.content); got != tt.want {
+				t.Errorf("ContainsInLoopAPIErrorScreen(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestContainsCustomAPIKeyDialog(t *testing.T) {
 	t.Parallel()
 

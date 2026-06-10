@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -924,6 +925,117 @@ func ContainsProviderRateLimitScreen(content string) bool {
 	return strings.Contains(strings.ToLower(content), "rate limit") &&
 		strings.Contains(content, "Keep trying") &&
 		strings.Contains(content, "Stop")
+}
+
+// ContainsInLoopAPIErrorScreen reports whether pane content shows an agent
+// loop that dead-ended on an unrecoverable provider API error and is now
+// parked at the idle prompt. This is the gc-hb2 wedge: a live (alive==true)
+// pane stuck on an in-loop 4xx — most often a `--resume` model-name reject
+// ("Invalid model name passed in model=...") — that crash recovery never sees
+// because the pane never dies.
+//
+// Detection is deliberately strict to avoid force-restarting a healthy agent
+// (which, for a crew/interactive session, would discard a human's
+// conversation):
+//
+//  1. The pane is parked at an idle prompt (the agent loop ended).
+//  2. The LAST meaningful line — the final output before the parked prompt,
+//     skipping prompt-box borders and blank lines — is an "API Error" banner
+//     with a non-retryable 4xx status. Requiring it to be the last line
+//     distinguishes a loop that died ON the error from a healthy agent that
+//     merely printed the error text and kept working (whose last line is its
+//     own prose). Transient failures (429 rate limits, 5xx server/overloaded)
+//     self-clear when the loop retries, so they are excluded.
+func ContainsInLoopAPIErrorScreen(content string) bool {
+	if !containsPromptIndicator(content) {
+		return false
+	}
+	last := lastMeaningfulLine(content)
+	return lineIsNonRetryableAPIError(last)
+}
+
+// lastMeaningfulLine returns the final line of content that carries agent or
+// provider output, skipping trailing blank lines, pure box-drawing borders,
+// and the idle prompt line itself. Returns "" if no such line exists.
+func lastMeaningfulLine(content string) string {
+	lines := strings.Split(content, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.ReplaceAll(lines[i], " ", " ")
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed == "" || isBoxBorderLine(trimmed) || isPromptLine(trimmed) {
+			continue
+		}
+		return trimmed
+	}
+	return ""
+}
+
+// isBoxBorderLine reports whether a line is composed solely of box-drawing
+// characters and whitespace (a TUI frame edge), carrying no text.
+func isBoxBorderLine(s string) bool {
+	hasBorder := false
+	for _, r := range s {
+		switch r {
+		case ' ', '\t':
+			continue
+		case '╭', '╮', '╰', '╯', '─', '│', '┃', '━', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼':
+			hasBorder = true
+		default:
+			return false
+		}
+	}
+	return hasBorder
+}
+
+// isPromptLine reports whether a line, once its surrounding box borders are
+// stripped, is just an empty input prompt (a prompt glyph with no typed
+// content). Handles both unbordered prompts and prompts rendered inside a TUI
+// input box (e.g. claude's "│ ❯            │").
+func isPromptLine(s string) bool {
+	inner := stripSurroundingBoxBorder(s)
+	switch inner {
+	case "❯", "›", ">", "$", "%", "#", "":
+		return true
+	}
+	return false
+}
+
+// stripSurroundingBoxBorder removes a leading and trailing vertical box-drawing
+// border (│/┃) plus surrounding whitespace, returning the inner text.
+func stripSurroundingBoxBorder(s string) string {
+	s = stripLeadingBoxBorder(s)
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if n := len(r); n > 0 && (r[n-1] == '│' || r[n-1] == '┃') {
+		s = strings.TrimSpace(string(r[:n-1]))
+	}
+	return s
+}
+
+// lineIsNonRetryableAPIError reports whether a line is an "API Error" banner
+// whose status is a deterministic 4xx that will not self-clear on retry. 429
+// (rate limit) is excluded — it is transient and handled by the rate-limit
+// path — as are all 5xx (server/overloaded) statuses.
+func lineIsNonRetryableAPIError(line string) bool {
+	idx := strings.Index(line, "API Error:")
+	if idx < 0 {
+		return false
+	}
+	rest := strings.TrimSpace(line[idx+len("API Error:"):])
+	// The status code is the first token after the banner.
+	statusTok := rest
+	if sp := strings.IndexAny(rest, " \t"); sp >= 0 {
+		statusTok = rest[:sp]
+	}
+	statusTok = strings.TrimRight(statusTok, ":")
+	code, err := strconv.Atoi(statusTok)
+	if err != nil {
+		return false
+	}
+	if code < 400 || code >= 500 {
+		return false
+	}
+	return code != 429
 }
 
 // containsPromptIndicator checks whether any line in the content looks like a

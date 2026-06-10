@@ -2140,6 +2140,31 @@ func TestEffectiveWorkQueryControlDispatcherIncludesLegacyWorkflowControlRoute(t
 	}
 }
 
+func TestRouteTargetsPoolUsesPoolName(t *testing.T) {
+	a := Agent{Name: "dog-1", Dir: "hello-world", PoolName: "hello-world/dog"}
+	if got, want := a.PoolDemandTarget(), "hello-world/dog"; got != want {
+		t.Fatalf("PoolDemandTarget() = %q, want %q", got, want)
+	}
+	got := a.RouteTargets()
+	if len(got) != 1 || got[0] != "hello-world/dog" {
+		t.Fatalf("RouteTargets() = %v, want [hello-world/dog]", got)
+	}
+}
+
+func TestRouteTargetsControlDispatcherIncludesLegacyAlias(t *testing.T) {
+	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
+	got := a.RouteTargets()
+	want := []string{"gascity/control-dispatcher", "gascity/workflow-control"}
+	if len(got) != len(want) {
+		t.Fatalf("RouteTargets() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("RouteTargets()[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()

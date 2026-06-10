@@ -3410,6 +3410,29 @@ func (a *Agent) poolDemandTarget() string {
 	return target
 }
 
+// PoolDemandTarget returns the gc.routed_to value this agent claims pool
+// demand for: its pool template name when part of a pool, otherwise its
+// qualified name. Callers scoping work-query side channels (e.g. event
+// relevance for the serve loop) use this so they stay symmetric with the
+// routed tier of EffectiveWorkQuery.
+func (a *Agent) PoolDemandTarget() string {
+	return a.poolDemandTarget()
+}
+
+// RouteTargets returns the gc.routed_to values the routed tier of this
+// agent's default work query matches: the pool demand target plus, for the
+// control dispatcher, its legacy workflow-control alias. Callers scoping the
+// serve loop's event relevance use this to stay symmetric with
+// EffectiveWorkQuery's routed tier without rebuilding the target logic.
+func (a *Agent) RouteTargets() []string {
+	target := a.poolDemandTarget()
+	targets := []string{target}
+	if legacy := legacyWorkflowControlQualifiedName(target); legacy != "" {
+		targets = append(targets, legacy)
+	}
+	return targets
+}
+
 func standardAssignedWorkQueryScript(includeEphemeralReady bool) string {
 	return standardAssignedInProgressWorkQueryScript(includeEphemeralReady) +
 		standardAssignedReadyWorkQueryScript(includeEphemeralReady)

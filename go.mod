@@ -18,7 +18,7 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	github.com/steveyegge/beads v1.0.5
+	github.com/steveyegge/beads v1.0.6-0.20260611054652-dc0561af28e9
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.19.0
@@ -243,10 +243,3 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
-
-// Pin beads to the exact commit the city's bd binary is built from. bd's
-// deterministic-dependency-id migration (gastownhall/beads#4259) made
-// dependencies.id a NOT NULL primary key with no DB default; the v1.0.5 tag
-// predates it and its dependency inserts fail against bd-migrated databases
-// (gc-2x0). Drop this replace once an upstream beads tag includes #4259.
-replace github.com/steveyegge/beads => github.com/cjpeterein/beads v0.0.0-20260610051550-45319b7149e0

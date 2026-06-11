@@ -534,11 +534,15 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 }
 
 // mailCheckAPIClient returns (client, "") when the API path is available,
-// or (nil, reason) when the caller should fall back. Indirected through a
-// var so tests inject a client pointed at httptest.Server or force a
-// specific fallback reason without spinning up a real controller.
+// or (nil, reason) when the caller should fall back. Routes through
+// supervisorCacheReadClient so a supervisor-managed city (alive controller
+// socket, no standalone [api] port) serves mail check from the supervisor
+// cache instead of per-render direct mail-provider reads (gc-lqt).
+// Indirected through a var so tests inject a client pointed at
+// httptest.Server or force a specific fallback reason without spinning up
+// a real controller.
 var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
+	if c := supervisorCacheReadClient(cityPath); c != nil {
 		return c, ""
 	}
 	return nil, apiClientFallbackReason(cityPath)

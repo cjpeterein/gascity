@@ -24,12 +24,14 @@ type BeadListInput struct {
 	Assignee string `query:"assignee" required:"false" doc:"Filter by assignee."`
 	Rig      string `query:"rig" required:"false" doc:"Filter by rig."`
 	All      bool   `query:"all" required:"false" doc:"Include closed beads."`
+	Cached   bool   `query:"cached" required:"false" doc:"Serve from the supervisor cache when possible. Opts out of the live lifecycle-gate read for status=in_progress; results may lag direct backing-store writes by one cache reconcile interval."`
 }
 
 // BeadReadyInput is the Huma input for GET /v0/city/{cityName}/beads/ready.
 type BeadReadyInput struct {
 	CityScope
 	BlockingParam
+	Cached bool `query:"cached" required:"false" doc:"Serve from the supervisor cache when possible, falling back to a live read per rig when the cache cannot answer. Results may lag direct backing-store writes by one cache reconcile interval."`
 }
 
 // BeadGraphInput is the Huma input for GET /v0/city/{cityName}/beads/graph/{rootID}.

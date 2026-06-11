@@ -127,6 +127,20 @@ func TestProviderStatusFixHintIncludesClaudeSetupTokenForNeedsAuth(t *testing.T)
 	}
 }
 
+func TestNormalizeInitProviderAcceptsPi(t *testing.T) {
+	got, err := normalizeInitProvider("pi")
+	if err != nil {
+		t.Fatalf("normalizeInitProvider(%q) error = %v, want nil", "pi", err)
+	}
+	if got != "pi" {
+		t.Fatalf("normalizeInitProvider(%q) = %q, want %q", "pi", got, "pi")
+	}
+
+	if _, err := normalizeInitProvider("not-a-provider"); err == nil {
+		t.Fatal("normalizeInitProvider(\"not-a-provider\") error = nil, want error")
+	}
+}
+
 func TestFinalizeInitBlocksProviderReadinessBeforeSupervisorRegistration(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")

@@ -46,11 +46,11 @@ func TestReadinessRegistrySync(t *testing.T) {
 		}
 	}
 
-	wantProviderKeys := []string{"antigravity", "claude", "codex", "gemini", "mimocode"}
+	wantProviderKeys := []string{"antigravity", "claude", "codex", "gemini", "mimocode", "pi"}
 	if got := slices.Sorted(maps.Keys(supportedProviderReadiness)); !slices.Equal(got, wantProviderKeys) {
 		t.Fatalf("supportedProviderReadiness keys = %v, want %v", got, wantProviderKeys)
 	}
-	wantProviderOrder := []string{"claude", "codex", "gemini", "mimocode", "antigravity"}
+	wantProviderOrder := []string{"claude", "codex", "gemini", "mimocode", "pi", "antigravity"}
 	if got := ProviderReadinessNames(); !slices.Equal(got, wantProviderOrder) {
 		t.Fatalf("ProviderReadinessNames() = %v, want %v", got, wantProviderOrder)
 	}
@@ -1024,6 +1024,209 @@ func TestHandleProviderReadinessReturnsNeedsAuthForAntigravityWithoutToken(t *te
 	assertProviderStatus(t, h, state, "/provider-readiness?providers=antigravity&fresh=1", "antigravity", probeStatusNeedsAuth)
 }
 
+func TestHandleProviderReadinessReturnsNotInstalledForPi(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	providerProbePathEnv = binDir
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=pi&fresh=1", "pi", probeStatusNotInstalled)
+}
+
+func TestHandleProviderReadinessReturnsNeedsAuthForPiWithoutCredentials(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "pi", "#!/bin/sh\nexit 0\n")
+
+	// pi initializes auth.json as an empty object before any login.
+	authPath := filepath.Join(homeDir, ".pi", "agent", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(authPath), 0o700); err != nil {
+		t.Fatalf("mkdir pi agent dir: %v", err)
+	}
+	if err := os.WriteFile(authPath, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write pi auth: %v", err)
+	}
+
+	unsetPiProviderEnv(t)
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	providerProbePathEnv = binDir
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=pi&fresh=1", "pi", probeStatusNeedsAuth)
+}
+
+func TestHandleProviderReadinessReturnsNeedsAuthForPiMissingAuthFile(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "pi", "#!/bin/sh\nexit 0\n")
+
+	unsetPiProviderEnv(t)
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	providerProbePathEnv = binDir
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=pi&fresh=1", "pi", probeStatusNeedsAuth)
+}
+
+func TestHandleProviderReadinessReturnsConfiguredForPiStoredCredentials(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "pi", "#!/bin/sh\nexit 0\n")
+
+	authPath := filepath.Join(homeDir, ".pi", "agent", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(authPath), 0o700); err != nil {
+		t.Fatalf("mkdir pi agent dir: %v", err)
+	}
+	if err := os.WriteFile(authPath, []byte(`{"anthropic":{"type":"oauth","refresh":"token"}}`), 0o600); err != nil {
+		t.Fatalf("write pi auth: %v", err)
+	}
+
+	unsetPiProviderEnv(t)
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	providerProbePathEnv = binDir
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=pi&fresh=1", "pi", probeStatusConfigured)
+}
+
+func TestHandleProviderReadinessReturnsConfiguredForPiEnvAPIKey(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "pi", "#!/bin/sh\nexit 0\n")
+
+	// pi resolves provider API keys from env vars even when auth.json is
+	// empty, so a recognized key alone means it is ready to run.
+	authPath := filepath.Join(homeDir, ".pi", "agent", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(authPath), 0o700); err != nil {
+		t.Fatalf("mkdir pi agent dir: %v", err)
+	}
+	if err := os.WriteFile(authPath, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write pi auth: %v", err)
+	}
+
+	unsetPiProviderEnv(t)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	providerProbePathEnv = binDir
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=pi&fresh=1", "pi", probeStatusConfigured)
+}
+
+func TestHandleProviderReadinessHonorsPiAgentDirOverride(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "pi", "#!/bin/sh\nexit 0\n")
+
+	// Credentials live only under the PI_CODING_AGENT_DIR override; the
+	// default ~/.pi/agent location stays empty to prove the override wins.
+	defaultAuthPath := filepath.Join(homeDir, ".pi", "agent", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(defaultAuthPath), 0o700); err != nil {
+		t.Fatalf("mkdir pi agent dir: %v", err)
+	}
+	if err := os.WriteFile(defaultAuthPath, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write default pi auth: %v", err)
+	}
+	overrideDir := filepath.Join(homeDir, "custom-pi-agent")
+	if err := os.MkdirAll(overrideDir, 0o700); err != nil {
+		t.Fatalf("mkdir pi agent override dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(overrideDir, "auth.json"),
+		[]byte(`{"openai":{"type":"api","key":"sk-test"}}`),
+		0o600,
+	); err != nil {
+		t.Fatalf("write override pi auth: %v", err)
+	}
+
+	unsetPiProviderEnv(t)
+	t.Setenv("PI_CODING_AGENT_DIR", overrideDir)
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	providerProbePathEnv = binDir
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=pi&fresh=1", "pi", probeStatusConfigured)
+}
+
+func TestHandleProviderReadinessReturnsProbeErrorForPiInvalidAuthJSON(t *testing.T) {
+	homeDir := t.TempDir()
+	binDir := filepath.Join(homeDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	writeExecutable(t, binDir, "pi", "#!/bin/sh\nexit 0\n")
+
+	authPath := filepath.Join(homeDir, ".pi", "agent", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(authPath), 0o700); err != nil {
+		t.Fatalf("mkdir pi agent dir: %v", err)
+	}
+	if err := os.WriteFile(authPath, []byte("not-json"), 0o600); err != nil {
+		t.Fatalf("write pi auth: %v", err)
+	}
+
+	unsetPiProviderEnv(t)
+	t.Setenv("HOME", homeDir)
+	originalPathEnv := providerProbePathEnv
+	providerProbePathEnv = binDir
+	defer func() {
+		providerProbePathEnv = originalPathEnv
+	}()
+
+	state := newFakeState(t)
+	h := newTestCityHandler(t, state)
+	assertProviderStatus(t, h, state, "/provider-readiness?providers=pi&fresh=1", "pi", probeStatusProbeError)
+}
+
 func TestHandleProviderReadinessReturnsInvalidConfigurationForUnsupportedAuthModes(t *testing.T) {
 	homeDir := t.TempDir()
 	binDir := filepath.Join(homeDir, "bin")
@@ -1516,6 +1719,14 @@ func assertGitHubCLIReadinessStatus(t *testing.T, h http.Handler, state State, w
 	}
 	if got := resp.Items["github_cli"].Status; got != want {
 		t.Fatalf("github_cli status = %q, want %q", got, want)
+	}
+}
+
+func unsetPiProviderEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+	for _, key := range piProviderAPIKeyEnvVars {
+		t.Setenv(key, "")
 	}
 }
 

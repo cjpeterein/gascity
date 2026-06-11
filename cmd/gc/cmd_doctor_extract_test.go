@@ -89,6 +89,72 @@ func TestBuildDoctorChecksSkipsNamedAlwaysMinConflictCheckWithoutConfig(t *testi
 	}
 }
 
+// TestBuildDoctorChecksRegistersCityDoltLocalOnlyForManagedCity verifies the
+// city-store variant of the dolt local-only remote check registers when the
+// city scope uses the managed bd store contract. The city's own database is
+// not in cfg.Rigs, so the per-rig loop cannot provide this coverage
+// (gc-gic4m: stray off-box remote on the hq city store went undetected).
+func TestBuildDoctorChecksRegistersCityDoltLocalOnlyForManagedCity(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"bd\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_DOLT", "")
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+
+	names := doctorCheckNames(buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    false,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+	}))
+
+	if doctorCheckIndex(names, "city:dolt-local-only-remote") < 0 {
+		t.Fatalf("city:dolt-local-only-remote missing for managed-bd city; names=%v", names)
+	}
+}
+
+// TestBuildDoctorChecksSkipsCityDoltLocalOnly verifies the city-store
+// variant stays unregistered for non-managed cities and GC_DOLT=skip
+// environments, matching the per-rig gating.
+func TestBuildDoctorChecksSkipsCityDoltLocalOnly(t *testing.T) {
+	tests := []struct {
+		name     string
+		cityToml string
+		gcDolt   string
+	}{
+		{
+			name:     "file-backed city",
+			cityToml: "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n",
+			gcDolt:   "",
+		},
+		{
+			name:     "GC_DOLT skip",
+			cityToml: "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"bd\"\n",
+			gcDolt:   "skip",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(tt.cityToml), 0o644); err != nil {
+				t.Fatalf("write city.toml: %v", err)
+			}
+			t.Setenv("GC_DOLT", tt.gcDolt)
+			cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+
+			names := doctorCheckNames(buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+				ControllerRunning:    false,
+				SkipCityDoltCheck:    true,
+				SkipManagedDoltCheck: true,
+			}))
+
+			if got := doctorCheckIndex(names, "city:dolt-local-only-remote"); got >= 0 {
+				t.Fatalf("city:dolt-local-only-remote registered at %d, want absent; names=%v", got, names)
+			}
+		})
+	}
+}
+
 func doctorCheckNames(checks []doctor.Check) []string {
 	names := make([]string, 0, len(checks))
 	for _, check := range checks {

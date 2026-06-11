@@ -15,16 +15,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`time.Local`/`$TZ`) or the `GC_OPERATOR_TZ` override; disable with
   `GC_INJECT_CLOCK=0`. Folded into the existing nudge inject, so it adds zero
   extra hook subprocesses per turn. See #3036.
-- The supervisor now merges a machine-local secrets file
-  (`${GC_HOME}/secrets.env`, dotenv syntax) into the launchd plist / systemd
-  unit environment on every service-file regeneration. This fixes provider
-  credentials being dropped when `gc start` runs from a shell that did not
-  export them (e.g. at login or after a reboot), which previously caused
-  silent provider auth failures. Only keys already eligible for the supervisor
-  environment are merged (provider credentials plus `GC_SUPERVISOR_ENV`
-  opt-ins); a value exported in the calling shell still takes precedence, and
-  `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` suppresses provider credentials from
-  both sources.
+- Provider credentials are no longer written into the supervisor service
+  file. `gc supervisor install` (and every `gc start`) previously snapshotted
+  the calling shell and inlined provider credentials and `GC_DOLT_PASSWORD`
+  as `Environment=` lines in the systemd unit / launchd plist, where
+  `systemctl --user show` exposed the values. Secret-class env now lives only
+  in a machine-local secrets file (`${GC_HOME}/secrets.env`, dotenv syntax,
+  `0600`): the install scan seeds shell-exported credentials into the file
+  (patching in place — operator comments and hand-added entries survive, and
+  a shell value replaces an existing entry), and `gc supervisor run` loads
+  the file at startup, filling only keys the service environment left unset.
+  The first install after upgrading rewrites the service file without
+  credentials; rotate any previously inlined keys if your exposure posture
+  warrants. This also keeps fixing the older gap where credentials exported
+  only in an interactive shell were dropped at login or reboot.
+  `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` now suppresses the seeding scan (the
+  service file is credential-free regardless); `GC_SUPERVISOR_ENV` opt-ins
+  seed even with the flag set. Dotenv parse errors no longer echo the
+  offending line, so a malformed credential line cannot leak into service
+  logs.
 - `GC_DOLT_SYNC_PUSH_TIMEOUT_SECS` configures the SQL-mode push wall-clock
   ceiling for `gc dolt sync` (default 1800s, replacing the prior fixed 120s
   that SIGKILLed large first pushes). Metadata queries keep their own 120s

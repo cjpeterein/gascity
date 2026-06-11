@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -335,8 +336,8 @@ func TestRenderSupervisorLaunchdTemplate(t *testing.T) {
 		LaunchdLabel:  defaultSupervisorLaunchdLabel,
 		Path:          "/usr/local/bin:/usr/bin:/bin",
 		ExtraEnv: []supervisorServiceEnvVar{
-			{Name: "ANTHROPIC_API_KEY", Value: `sk-&<"'>`},
-			{Name: "OPENAI_API_KEY", Value: "sk-openai-123"},
+			{Name: "CLAUDE_CONFIG_DIR", Value: `/cfg&<"'>`},
+			{Name: "GC_DOLT_USER", Value: "gc-dolt-user"},
 		},
 	}
 
@@ -355,10 +356,10 @@ func TestRenderSupervisorLaunchdTemplate(t *testing.T) {
 		"XDG_RUNTIME_DIR",
 		"/tmp/gc-run",
 		"<key>PATH</key>",
-		"<key>ANTHROPIC_API_KEY</key>",
-		"<string>sk-&amp;&lt;&quot;&apos;&gt;</string>",
-		"<key>OPENAI_API_KEY</key>",
-		"<string>sk-openai-123</string>",
+		"<key>CLAUDE_CONFIG_DIR</key>",
+		"<string>/cfg&amp;&lt;&quot;&apos;&gt;</string>",
+		"<key>GC_DOLT_USER</key>",
+		"<string>gc-dolt-user</string>",
 		"<key>GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL</key>",
 		"<string>1</string>",
 	} {
@@ -398,8 +399,8 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		LaunchdLabel:  defaultSupervisorLaunchdLabel,
 		Path:          "/usr/local/bin:/usr/bin:/bin",
 		ExtraEnv: []supervisorServiceEnvVar{
-			{Name: "ANTHROPIC_API_KEY", Value: `sk-"ant"\value`},
-			{Name: "OPENAI_API_KEY", Value: "sk-openai-123"},
+			{Name: "CLAUDE_CONFIG_DIR", Value: `/cfg/"quoted"\dir`},
+			{Name: "GC_DOLT_USER", Value: "gc-dolt-user"},
 		},
 	}
 
@@ -417,8 +418,8 @@ func TestRenderSupervisorSystemdTemplate(t *testing.T) {
 		`Environment=GC_HOME="/home/user/.gc"`,
 		`Environment=XDG_RUNTIME_DIR="/tmp/gc-run"`,
 		`Environment=PATH="/usr/local/bin:/usr/bin:/bin"`,
-		`Environment=ANTHROPIC_API_KEY="sk-\"ant\"\\value"`,
-		`Environment=OPENAI_API_KEY="sk-openai-123"`,
+		`Environment=CLAUDE_CONFIG_DIR="/cfg/\"quoted\"\\dir"`,
+		`Environment=GC_DOLT_USER="gc-dolt-user"`,
 	} {
 		if !strings.Contains(content, check) {
 			t.Fatalf("systemd template missing %q", check)
@@ -483,20 +484,31 @@ func TestBuildSupervisorServiceDataTreatsPreserveSignalEnvAsFixed(t *testing.T) 
 	}
 }
 
-func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
+// TestBuildSupervisorServiceDataExcludesProviderEnvFromServiceFile asserts the
+// secret-handling contract: provider credentials and GC_DOLT_PASSWORD never
+// appear in the generated service file env. They are delivered via
+// ${GC_HOME}/secrets.env, which `gc supervisor run` loads at startup.
+// Non-secret allowlisted keys and GC_SUPERVISOR_ENV opt-ins keep inlining.
+func TestBuildSupervisorServiceDataExcludesProviderEnvFromServiceFile(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
 	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
-	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-123")
-	t.Setenv("ANTHROPIC_BASE_URL", "https://anthropic.example.test")
-	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
-	t.Setenv("GEMINI_API_KEY", "gemini-123")
-	t.Setenv("GOOGLE_CLOUD_PROJECT", "gc-project")
-	t.Setenv("DEEPSEEK_API_KEY", "ds-123")
-	t.Setenv("OLLAMA_HOST", "http://localhost:11434")
-	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA123")
+	secretProbes := map[string]string{
+		"ANTHROPIC_API_KEY":    "sk-ant-123",
+		"ANTHROPIC_BASE_URL":   "https://anthropic.example.test",
+		"OPENAI_API_KEY":       "sk-openai-123",
+		"GEMINI_API_KEY":       "gemini-123",
+		"GOOGLE_CLOUD_PROJECT": "gc-project",
+		"DEEPSEEK_API_KEY":     "ds-123",
+		"OLLAMA_HOST":          "http://localhost:11434",
+		"AWS_ACCESS_KEY_ID":    "AKIA123",
+		"GC_DOLT_PASSWORD":     "dolt-secret-123",
+	}
+	for key, val := range secretProbes {
+		t.Setenv(key, val)
+	}
 	t.Setenv("AWS_PAGER", "less")
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
 	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN,IGNORED_EMPTY")
@@ -510,15 +522,12 @@ func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
 	}
 
 	got := supervisorServiceEnvMap(data.ExtraEnv)
+	for key := range secretProbes {
+		if _, ok := got[key]; ok {
+			t.Fatalf("ExtraEnv should not include secret key %s: %#v", key, got)
+		}
+	}
 	for key, want := range map[string]string{
-		"ANTHROPIC_API_KEY":     "sk-ant-123",
-		"ANTHROPIC_BASE_URL":    "https://anthropic.example.test",
-		"OPENAI_API_KEY":        "sk-openai-123",
-		"GEMINI_API_KEY":        "gemini-123",
-		"GOOGLE_CLOUD_PROJECT":  "gc-project",
-		"DEEPSEEK_API_KEY":      "ds-123",
-		"OLLAMA_HOST":           "http://localhost:11434",
-		"AWS_ACCESS_KEY_ID":     "AKIA123",
 		"CLAUDE_CONFIG_DIR":     filepath.Join(homeDir, ".claude"),
 		"CUSTOM_PROVIDER_TOKEN": "custom-token",
 	} {
@@ -531,55 +540,52 @@ func TestBuildSupervisorServiceDataIncludesProviderEnv(t *testing.T) {
 			t.Fatalf("ExtraEnv should not include %s: %#v", key, got)
 		}
 	}
+
+	for name, tmpl := range map[string]string{
+		"launchd": supervisorLaunchdTemplate,
+		"systemd": supervisorSystemdTemplate,
+	} {
+		content, err := renderSupervisorTemplate(tmpl, data)
+		if err != nil {
+			t.Fatalf("rendering %s template: %v", name, err)
+		}
+		for key, val := range secretProbes {
+			if strings.Contains(content, val) {
+				t.Fatalf("rendered %s service file contains the value of %s", name, key)
+			}
+		}
+	}
 }
 
-func TestBuildSupervisorServiceDataOmitsProviderEnvWhenOptedOut(t *testing.T) {
+// TestSupervisorInstallSecretEnvRespectsOmitProviderCreds asserts the
+// GC_SUPERVISOR_OMIT_PROVIDER_CREDS contract after the secrets.env migration:
+// the flag suppresses seeding shell provider credentials into
+// ${GC_HOME}/secrets.env. GC_DOLT_PASSWORD is not a provider credential and
+// still seeds, and an explicit GC_SUPERVISOR_ENV opt-in wins over the flag,
+// matching the explicit tier's historical precedence.
+func TestSupervisorInstallSecretEnvRespectsOmitProviderCreds(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
 	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
-	t.Setenv("XDG_RUNTIME_DIR", "/tmp/gc-run")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-123")
-	t.Setenv("ANTHROPIC_BASE_URL", "https://anthropic.example.test")
 	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
-	t.Setenv("GEMINI_API_KEY", "gemini-123")
-	t.Setenv("GOOGLE_CLOUD_PROJECT", "gc-project")
-	t.Setenv("DEEPSEEK_API_KEY", "ds-123")
-	t.Setenv("OLLAMA_HOST", "http://localhost:11434")
-	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA123")
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
-	t.Setenv("GC_SUPERVISOR_ENV", "CUSTOM_PROVIDER_TOKEN")
-	t.Setenv("CUSTOM_PROVIDER_TOKEN", "custom-token")
+	t.Setenv("GC_DOLT_PASSWORD", "dolt-secret-123")
+	t.Setenv("GC_SUPERVISOR_ENV", "OPENAI_API_KEY")
 	t.Setenv(supervisorOmitProviderCredsEnv, "1")
 
-	data, err := buildSupervisorServiceData()
-	if err != nil {
-		t.Fatalf("buildSupervisorServiceData: %v", err)
+	got := supervisorInstallSecretEnv()
+	if _, ok := got["ANTHROPIC_API_KEY"]; ok {
+		t.Fatalf("secret env should not include provider key ANTHROPIC_API_KEY when %s=1: %#v",
+			supervisorOmitProviderCredsEnv, got)
 	}
-
-	got := supervisorServiceEnvMap(data.ExtraEnv)
-	for _, key := range []string{
-		"ANTHROPIC_API_KEY",
-		"ANTHROPIC_BASE_URL",
-		"OPENAI_API_KEY",
-		"GEMINI_API_KEY",
-		"GOOGLE_CLOUD_PROJECT",
-		"DEEPSEEK_API_KEY",
-		"OLLAMA_HOST",
-		"AWS_ACCESS_KEY_ID",
-	} {
-		if _, ok := got[key]; ok {
-			t.Fatalf("ExtraEnv should not include provider key %s when %s=1: %#v",
-				key, supervisorOmitProviderCredsEnv, got)
-		}
+	if got["GC_DOLT_PASSWORD"] != "dolt-secret-123" {
+		t.Fatalf("secret env[GC_DOLT_PASSWORD] = %q, want %q (omit flag covers provider creds only)",
+			got["GC_DOLT_PASSWORD"], "dolt-secret-123")
 	}
-	for key, want := range map[string]string{
-		"CLAUDE_CONFIG_DIR":     filepath.Join(homeDir, ".claude"),
-		"CUSTOM_PROVIDER_TOKEN": "custom-token",
-	} {
-		if got[key] != want {
-			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
-		}
+	if got["OPENAI_API_KEY"] != "sk-openai-123" {
+		t.Fatalf("secret env[OPENAI_API_KEY] = %q, want %q (explicit GC_SUPERVISOR_ENV opt-in wins over omit flag)",
+			got["OPENAI_API_KEY"], "sk-openai-123")
 	}
 }
 
@@ -604,12 +610,11 @@ func writeSupervisorSecretsEnvFile(t *testing.T, content string) {
 	}
 }
 
-// TestBuildSupervisorServiceDataMergesSecretsEnvFile asserts the durable fix
-// for credentials that live only in ${GC_HOME}/secrets.env: with the secret
-// absent from the calling shell, it still reaches the service env. A
-// non-allowlisted key in the file is dropped; a GC_SUPERVISOR_ENV opt-in key
-// present only in the file is honored.
-func TestBuildSupervisorServiceDataMergesSecretsEnvFile(t *testing.T) {
+// TestBuildSupervisorServiceDataDoesNotInlineSecretsEnvFile asserts that
+// ${GC_HOME}/secrets.env values never reach the generated service file. The
+// file is loaded by `gc supervisor run` at startup instead of being baked
+// into Environment= lines that `systemctl --user show` would expose.
+func TestBuildSupervisorServiceDataDoesNotInlineSecretsEnvFile(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
@@ -632,64 +637,47 @@ UNRELATED_SECRET=do-not-persist
 	}
 
 	got := supervisorServiceEnvMap(data.ExtraEnv)
-	for key, want := range map[string]string{
-		"ANTHROPIC_AUTH_TOKEN":  "sk-from-file",
-		"CUSTOM_PROVIDER_TOKEN": "custom-from-file",
-	} {
-		if got[key] != want {
-			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
+	for _, key := range []string{"ANTHROPIC_AUTH_TOKEN", "CUSTOM_PROVIDER_TOKEN", "UNRELATED_SECRET"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("ExtraEnv should not include secrets-file key %s: %#v", key, got)
 		}
-	}
-	if _, ok := got["UNRELATED_SECRET"]; ok {
-		t.Fatalf("ExtraEnv should not include non-allowlisted UNRELATED_SECRET: %#v", got)
 	}
 }
 
-// TestBuildSupervisorServiceDataShellEnvWinsOverSecretsFile asserts the
-// gap-fill precedence: a value exported in the calling shell takes precedence
-// over the same key in ${GC_HOME}/secrets.env.
-func TestBuildSupervisorServiceDataShellEnvWinsOverSecretsFile(t *testing.T) {
+// TestMergeSupervisorSecretsEnvFileShellValueWinsOverExistingEntry asserts the
+// seeding precedence: a value found by the install scan replaces the same key
+// already present in ${GC_HOME}/secrets.env, matching the historical
+// shell-over-file tier order.
+func TestMergeSupervisorSecretsEnvFileShellValueWinsOverExistingEntry(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
-	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", "sk-from-shell")
 
 	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=sk-from-file\n")
 
-	data, err := buildSupervisorServiceData()
-	if err != nil {
-		t.Fatalf("buildSupervisorServiceData: %v", err)
+	if err := mergeSupervisorSecretsEnvFile(map[string]string{"ANTHROPIC_AUTH_TOKEN": "sk-from-shell"}); err != nil {
+		t.Fatalf("mergeSupervisorSecretsEnvFile: %v", err)
 	}
 
-	if got := supervisorServiceEnvMap(data.ExtraEnv); got["ANTHROPIC_AUTH_TOKEN"] != "sk-from-shell" {
-		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want shell value %q",
+	got := readSupervisorSecretsEnvFile(t)
+	if got["ANTHROPIC_AUTH_TOKEN"] != "sk-from-shell" {
+		t.Fatalf("secrets file[ANTHROPIC_AUTH_TOKEN] = %q, want shell value %q",
 			got["ANTHROPIC_AUTH_TOKEN"], "sk-from-shell")
 	}
 }
 
-// TestBuildSupervisorServiceDataSecretsFileRespectsOmitProviderCreds asserts
-// that the provider-credential opt-out also suppresses provider keys sourced
-// from the secrets file.
-func TestBuildSupervisorServiceDataSecretsFileRespectsOmitProviderCreds(t *testing.T) {
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
-	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
-	t.Setenv(supervisorOmitProviderCredsEnv, "1")
-
-	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=sk-from-file\n")
-
-	data, err := buildSupervisorServiceData()
+// readSupervisorSecretsEnvFile parses ${GC_HOME}/secrets.env for assertions.
+func readSupervisorSecretsEnvFile(t *testing.T) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(supervisorSecretsEnvFilePath())
 	if err != nil {
-		t.Fatalf("buildSupervisorServiceData: %v", err)
+		t.Fatalf("reading secrets file: %v", err)
 	}
-
-	if _, ok := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; ok {
-		t.Fatalf("ExtraEnv should not include provider key from secrets file when %s=1",
-			supervisorOmitProviderCredsEnv)
+	entries, err := processenv.ParseEnvFile(string(data))
+	if err != nil {
+		t.Fatalf("parsing secrets file: %v", err)
 	}
+	return entries
 }
 
 // TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError asserts that the
@@ -705,34 +693,54 @@ func TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError(t *testing.T) 
 	}
 }
 
-// TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully asserts
-// the documented fail-safe: a malformed secrets file does not block service
-// file generation (no error) and contributes no env — the malformed file is
-// ignored rather than partially applied, so the good first line must not leak
-// through.
-func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *testing.T) {
+// TestLoadSupervisorSecretsEnvMalformedFileDegradesGracefully asserts the
+// run-path fail-safe: a malformed secrets file applies no env at supervisor
+// startup — it is ignored rather than partially applied, so the good first
+// line must not leak through.
+func TestLoadSupervisorSecretsEnvMalformedFileDegradesGracefully(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
-	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
 
 	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=sk-from-file\nMALFORMED LINE WITHOUT EQUALS\n")
 
-	data, err := buildSupervisorServiceData()
-	if err != nil {
-		t.Fatalf("buildSupervisorServiceData with malformed secrets file: %v", err)
-	}
-	if _, ok := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; ok {
-		t.Fatalf("ExtraEnv should not include any key from a malformed secrets file")
+	loadSupervisorSecretsEnvIntoProcessEnv()
+	if got := os.Getenv("ANTHROPIC_AUTH_TOKEN"); got != "" {
+		t.Fatalf("process env ANTHROPIC_AUTH_TOKEN = %q after malformed file load, want empty", got)
 	}
 }
 
-// TestBuildSupervisorServiceDataForwardsRepresentativeProviderPrefixes asserts
-// that representative provider-prefix credentials are forwarded into the
-// supervisor's persistent env. internal/processenv owns complete allowlist
-// coverage; this test covers the supervisor integration boundary.
-func TestBuildSupervisorServiceDataForwardsRepresentativeProviderPrefixes(t *testing.T) {
+// TestMergeSupervisorSecretsEnvFileMalformedExistingFileFails asserts the
+// seeding write fails loudly instead of rewriting (and so destroying) a
+// secrets file it cannot parse, and leaves the file bytes untouched.
+func TestMergeSupervisorSecretsEnvFileMalformedExistingFileFails(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	const malformed = "MALFORMED LINE WITHOUT EQUALS\n"
+	writeSupervisorSecretsEnvFile(t, malformed)
+
+	err := mergeSupervisorSecretsEnvFile(map[string]string{"OPENAI_API_KEY": "sk-openai-123"})
+	if err == nil {
+		t.Fatal("mergeSupervisorSecretsEnvFile with malformed existing file = nil error, want error")
+	}
+	data, readErr := os.ReadFile(supervisorSecretsEnvFilePath())
+	if readErr != nil {
+		t.Fatalf("reading secrets file after failed merge: %v", readErr)
+	}
+	if string(data) != malformed {
+		t.Fatalf("secrets file content changed after failed merge: %q", string(data))
+	}
+}
+
+// TestSupervisorInstallSecretEnvCollectsRepresentativeProviderPrefixes asserts
+// that representative provider-prefix credentials are routed to the
+// secrets.env seeding plan and kept out of the service-file env.
+// internal/processenv owns complete allowlist coverage; this test covers the
+// supervisor integration boundary.
+func TestSupervisorInstallSecretEnvCollectsRepresentativeProviderPrefixes(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
@@ -766,15 +774,23 @@ func TestBuildSupervisorServiceDataForwardsRepresentativeProviderPrefixes(t *tes
 	if err != nil {
 		t.Fatalf("buildSupervisorServiceData: %v", err)
 	}
-	got := supervisorServiceEnvMap(data.ExtraEnv)
+	inline := supervisorServiceEnvMap(data.ExtraEnv)
+	secrets := supervisorInstallSecretEnv()
 	for k, want := range probes {
-		if got[k] != want {
-			t.Errorf("ExtraEnv[%s] = %q, want %q", k, got[k], want)
+		if _, ok := inline[k]; ok {
+			t.Errorf("ExtraEnv should not include provider key %s", k)
+		}
+		if secrets[k] != want {
+			t.Errorf("secret env[%s] = %q, want %q", k, secrets[k], want)
 		}
 	}
 }
 
-func TestBuildSupervisorServiceDataForwardsCuratedProviderCredentialEnvKeys(t *testing.T) {
+// TestSupervisorInstallSecretEnvCollectsCuratedProviderCredentialEnvKeys
+// asserts the exact-name provider credential allowlist is routed to the
+// secrets.env seeding plan and kept out of the service-file env, while broad
+// AWS runtime state stays out of both.
+func TestSupervisorInstallSecretEnvCollectsCuratedProviderCredentialEnvKeys(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
@@ -815,15 +831,22 @@ func TestBuildSupervisorServiceDataForwardsCuratedProviderCredentialEnvKeys(t *t
 	if err != nil {
 		t.Fatalf("buildSupervisorServiceData: %v", err)
 	}
-	got := supervisorServiceEnvMap(data.ExtraEnv)
+	inline := supervisorServiceEnvMap(data.ExtraEnv)
+	secrets := supervisorInstallSecretEnv()
 	for k, want := range probes {
-		if got[k] != want {
-			t.Errorf("ExtraEnv[%s] = %q, want %q - exact provider key may be missing", k, got[k], want)
+		if _, ok := inline[k]; ok {
+			t.Errorf("ExtraEnv should not include provider key %s", k)
+		}
+		if secrets[k] != want {
+			t.Errorf("secret env[%s] = %q, want %q - exact provider key may be missing", k, secrets[k], want)
 		}
 	}
 	for _, key := range []string{"AWS_EXECUTION_ENV", "AWS_PAGER", "AWS_VAULT"} {
-		if _, ok := got[key]; ok {
+		if _, ok := inline[key]; ok {
 			t.Errorf("ExtraEnv should not include broad AWS runtime state %s", key)
+		}
+		if _, ok := secrets[key]; ok {
+			t.Errorf("secret env should not include broad AWS runtime state %s", key)
 		}
 	}
 }
@@ -856,10 +879,21 @@ func TestBuildSupervisorServiceDataReadsAllowlistedDoltCredentialKeysFromLaunchc
 		t.Fatalf("buildSupervisorServiceData: %v", err)
 	}
 	got := supervisorServiceEnvMap(data.ExtraEnv)
-	for key, want := range stub {
+	for key, want := range map[string]string{
+		"GC_DOLT_USER":     "gc_user",
+		"GC_DOLT_LOGLEVEL": "debug",
+	} {
 		if got[key] != want {
 			t.Fatalf("ExtraEnv[%s] = %q, want %q (all env: %#v)", key, got[key], want, got)
 		}
+	}
+	if _, ok := got["GC_DOLT_PASSWORD"]; ok {
+		t.Fatalf("ExtraEnv should not include GC_DOLT_PASSWORD (routes to secrets.env): %#v", got)
+	}
+	secrets := supervisorInstallSecretEnv()
+	if secrets["GC_DOLT_PASSWORD"] != "redacted-test-value" {
+		t.Fatalf("secret env[GC_DOLT_PASSWORD] = %q, want launchctl value %q",
+			secrets["GC_DOLT_PASSWORD"], "redacted-test-value")
 	}
 }
 
@@ -992,6 +1026,307 @@ func TestBuildSupervisorServiceDataDeduplicatesLaunchctlFallbackProbes(t *testin
 		if calls[key] != 1 {
 			t.Fatalf("launchctl getenv calls for %s = %d, want 1 (all calls: %#v)", key, calls[key], calls)
 		}
+	}
+}
+
+// TestSupervisorInstallProbesLaunchctlOncePerKeyAcrossScans asserts the
+// inline scan (buildSupervisorServiceData) and the secret scan
+// (supervisorInstallSecretEnv) probe disjoint launchctl key sets, so a full
+// install issues at most one getenv per key.
+func TestSupervisorInstallProbesLaunchctlOncePerKeyAcrossScans(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_DOLT_LOGLEVEL", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+
+	calls := map[string]int{}
+	prev := supervisorLaunchctlGetenv
+	supervisorLaunchctlGetenv = func(key string) string {
+		calls[key]++
+		return ""
+	}
+	t.Cleanup(func() { supervisorLaunchctlGetenv = prev })
+
+	if _, err := buildSupervisorServiceData(); err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	supervisorInstallSecretEnv()
+	for _, key := range []string{"GC_DOLT_LOGLEVEL", "GC_DOLT_PASSWORD"} {
+		if calls[key] != 1 {
+			t.Fatalf("launchctl getenv calls for %s = %d across both scans, want 1 (all calls: %#v)", key, calls[key], calls)
+		}
+	}
+}
+
+// TestSupervisorInstallSecretEnvCollectsShellSecrets asserts the basic
+// install-scan contract: provider credentials and GC_DOLT_PASSWORD found in
+// the calling shell are collected for secrets.env seeding; empty values and
+// non-secret keys are not.
+func TestSupervisorInstallSecretEnvCollectsShellSecrets(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("OPENAI_API_KEY", "sk-openai-123")
+	t.Setenv("GC_DOLT_PASSWORD", "dolt-secret-123")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
+	t.Setenv("UNRELATED_SECRET", "do-not-persist")
+
+	got := supervisorInstallSecretEnv()
+	for key, want := range map[string]string{
+		"OPENAI_API_KEY":   "sk-openai-123",
+		"GC_DOLT_PASSWORD": "dolt-secret-123",
+	} {
+		if got[key] != want {
+			t.Fatalf("secret env[%s] = %q, want %q (all: %#v)", key, got[key], want, got)
+		}
+	}
+	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR", "UNRELATED_SECRET"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("secret env should not include %s: %#v", key, got)
+		}
+	}
+}
+
+// TestMergeSupervisorSecretsEnvFileCreatesFileWithTightPerms asserts a fresh
+// seeding write creates ${GC_HOME} as needed and the secrets file with 0600
+// permissions, leaving no temp residue behind.
+func TestMergeSupervisorSecretsEnvFileCreatesFileWithTightPerms(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(homeDir, ".gc")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	if err := mergeSupervisorSecretsEnvFile(map[string]string{
+		"OPENAI_API_KEY":   "sk-openai-123",
+		"GC_DOLT_PASSWORD": "dolt-secret-123",
+	}); err != nil {
+		t.Fatalf("mergeSupervisorSecretsEnvFile: %v", err)
+	}
+
+	info, err := os.Stat(supervisorSecretsEnvFilePath())
+	if err != nil {
+		t.Fatalf("Stat(secrets file): %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("secrets file mode = %03o, want 600", got)
+	}
+	got := readSupervisorSecretsEnvFile(t)
+	for key, want := range map[string]string{
+		"OPENAI_API_KEY":   "sk-openai-123",
+		"GC_DOLT_PASSWORD": "dolt-secret-123",
+	} {
+		if got[key] != want {
+			t.Fatalf("secrets file[%s] = %q, want %q", key, got[key], want)
+		}
+	}
+	entries, err := os.ReadDir(gcHome)
+	if err != nil {
+		t.Fatalf("ReadDir(%q): %v", gcHome, err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != supervisorSecretsEnvFileName {
+			t.Fatalf("unexpected residue in GC_HOME after merge: %q", entry.Name())
+		}
+	}
+}
+
+// TestMergeSupervisorSecretsEnvFilePreservesOperatorContent asserts the
+// seeding write is a patch, not a rewrite: operator comments and unrelated
+// entries survive, every assignment line of an updated key is replaced (the
+// parser is last-assignment-wins), and new keys are appended. Values that
+// need quoting round-trip through the dotenv parser.
+func TestMergeSupervisorSecretsEnvFilePreservesOperatorContent(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	writeSupervisorSecretsEnvFile(t, `# operator-managed secrets
+KEEP_ME=untouched-value
+
+OPENAI_API_KEY=sk-old-1
+# trailing note
+OPENAI_API_KEY=sk-old-2
+`)
+
+	gnarly := `with "quotes" = and #hash `
+	if err := mergeSupervisorSecretsEnvFile(map[string]string{
+		"OPENAI_API_KEY":    "sk-new",
+		"ANTHROPIC_API_KEY": gnarly,
+	}); err != nil {
+		t.Fatalf("mergeSupervisorSecretsEnvFile: %v", err)
+	}
+
+	raw, err := os.ReadFile(supervisorSecretsEnvFilePath())
+	if err != nil {
+		t.Fatalf("reading secrets file: %v", err)
+	}
+	content := string(raw)
+	for _, want := range []string{"# operator-managed secrets", "# trailing note", "KEEP_ME=untouched-value"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("merge dropped operator content %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "sk-old-1") || strings.Contains(content, "sk-old-2") {
+		t.Fatalf("merge left a stale assignment in place:\n%s", content)
+	}
+
+	got := readSupervisorSecretsEnvFile(t)
+	for key, want := range map[string]string{
+		"KEEP_ME":           "untouched-value",
+		"OPENAI_API_KEY":    "sk-new",
+		"ANTHROPIC_API_KEY": gnarly,
+	} {
+		if got[key] != want {
+			t.Fatalf("secrets file[%s] = %q, want %q", key, got[key], want)
+		}
+	}
+}
+
+// TestMergeSupervisorSecretsEnvFileSkipsValuesWithLineBreaks asserts a value
+// containing a line break is refused: written raw it would corrupt the
+// line-oriented file and poison every later load.
+func TestMergeSupervisorSecretsEnvFileSkipsValuesWithLineBreaks(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	if err := mergeSupervisorSecretsEnvFile(map[string]string{
+		"OPENAI_API_KEY":    "sk-openai-123",
+		"ANTHROPIC_API_KEY": "sk-bad\nINJECTED=1",
+	}); err != nil {
+		t.Fatalf("mergeSupervisorSecretsEnvFile: %v", err)
+	}
+
+	got := readSupervisorSecretsEnvFile(t)
+	if got["OPENAI_API_KEY"] != "sk-openai-123" {
+		t.Fatalf("secrets file[OPENAI_API_KEY] = %q, want %q", got["OPENAI_API_KEY"], "sk-openai-123")
+	}
+	for _, key := range []string{"ANTHROPIC_API_KEY", "INJECTED"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("secrets file should not contain %s from a line-break value: %#v", key, got)
+		}
+	}
+}
+
+// TestMergeSupervisorSecretsEnvFileNothingToSeedCreatesNoFile asserts an
+// install with no secret-class env and no existing file leaves no
+// secrets.env behind.
+func TestMergeSupervisorSecretsEnvFileNothingToSeedCreatesNoFile(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	if err := mergeSupervisorSecretsEnvFile(nil); err != nil {
+		t.Fatalf("mergeSupervisorSecretsEnvFile(nil): %v", err)
+	}
+	if _, err := os.Stat(supervisorSecretsEnvFilePath()); !os.IsNotExist(err) {
+		t.Fatalf("Stat(secrets file) err = %v, want IsNotExist", err)
+	}
+}
+
+// TestMergeSupervisorSecretsEnvFileTightensLoosePermissions asserts an
+// existing secrets file is clamped to 0600 even when its content is already
+// up to date.
+func TestMergeSupervisorSecretsEnvFileTightensLoosePermissions(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+
+	writeSupervisorSecretsEnvFile(t, "OPENAI_API_KEY=sk-openai-123\n")
+	path := supervisorSecretsEnvFilePath()
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	if err := mergeSupervisorSecretsEnvFile(map[string]string{"OPENAI_API_KEY": "sk-openai-123"}); err != nil {
+		t.Fatalf("mergeSupervisorSecretsEnvFile: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("secrets file mode = %03o after no-op merge, want 600", got)
+	}
+}
+
+// TestLoadSupervisorSecretsEnvIntoProcessEnvFillsOnlyUnsetKeys asserts the
+// supervisor-run load tier order: service-file env (already in the process
+// env) wins, the file fills gaps, an empty env value counts as unset, and
+// fixed keys (GC_HOME, PATH, ...) are never taken from the file.
+func TestLoadSupervisorSecretsEnvIntoProcessEnvFillsOnlyUnsetKeys(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(homeDir, ".gc")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+	t.Setenv("OPENAI_API_KEY", "sk-from-unit")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	_ = os.Unsetenv("GC_DOLT_PASSWORD")
+
+	writeSupervisorSecretsEnvFile(t, `OPENAI_API_KEY=sk-from-file
+ANTHROPIC_API_KEY=sk-ant-from-file
+GC_DOLT_PASSWORD=dolt-from-file
+GC_HOME=/somewhere/else
+`)
+
+	loadSupervisorSecretsEnvIntoProcessEnv()
+
+	for key, want := range map[string]string{
+		"OPENAI_API_KEY":    "sk-from-unit",
+		"ANTHROPIC_API_KEY": "sk-ant-from-file",
+		"GC_DOLT_PASSWORD":  "dolt-from-file",
+		"GC_HOME":           gcHome,
+	} {
+		if got := os.Getenv(key); got != want {
+			t.Fatalf("process env %s = %q after load, want %q", key, got, want)
+		}
+	}
+}
+
+// TestLoadSupervisorSecretsEnvMissingFileIsNoOp asserts the normal
+// no-secrets-file case loads nothing and does not fail.
+func TestLoadSupervisorSecretsEnvMissingFileIsNoOp(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	loadSupervisorSecretsEnvIntoProcessEnv()
+	if got := os.Getenv("ANTHROPIC_API_KEY"); got != "" {
+		t.Fatalf("process env ANTHROPIC_API_KEY = %q with no secrets file, want empty", got)
+	}
+}
+
+// TestDoSupervisorRunLoadsSecretsEnvIntoProcessEnv verifies the run-loop
+// entry point loads ${GC_HOME}/secrets.env before delegating to the
+// supervisor loop, covering the call site on both the systemd/launchd service
+// path and detached starts. The runSupervisorFunc indirection substitutes a
+// no-op loop and observes the pre-loop env.
+func TestDoSupervisorRunLoadsSecretsEnvIntoProcessEnv(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_API_KEY=sk-ant-from-file\n")
+
+	origRun := runSupervisorFunc
+	inLoop := ""
+	runSupervisorFunc = func(io.Writer, io.Writer) int {
+		inLoop = os.Getenv("ANTHROPIC_API_KEY")
+		return 0
+	}
+	t.Cleanup(func() { runSupervisorFunc = origRun })
+
+	if rc := doSupervisorRun(io.Discard, io.Discard); rc != 0 {
+		t.Fatalf("doSupervisorRun = %d, want 0", rc)
+	}
+	if inLoop != "sk-ant-from-file" {
+		t.Fatalf("ANTHROPIC_API_KEY in run loop = %q, want %q", inLoop, "sk-ant-from-file")
 	}
 }
 
@@ -1330,6 +1665,61 @@ func TestSupervisorInstallUnsupportedOS(t *testing.T) {
 	code := doSupervisorInstall(&stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doSupervisorInstall code = %d, want 1", code)
+	}
+}
+
+// TestInstallSupervisorSystemdSeedsSecretsEnvAndKeepsUnitClean covers the
+// install-path wiring end to end on linux: with a provider credential in the
+// install scan, the installer seeds ${GC_HOME}/secrets.env (0600) and the
+// unit written to disk carries no credential value.
+func TestInstallSupervisorSystemdSeedsSecretsEnvAndKeepsUnitClean(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("OPENAI_API_KEY", "sk-openai-secret-123")
+
+	oldRun := supervisorSystemctlRun
+	oldActive := supervisorSystemctlActive
+	oldAvailable := supervisorSystemctlUserAvailable
+	supervisorSystemctlRun = func(...string) error { return nil }
+	supervisorSystemctlActive = func(string) bool { return false }
+	supervisorSystemctlUserAvailable = func() bool { return true }
+	t.Cleanup(func() {
+		supervisorSystemctlRun = oldRun
+		supervisorSystemctlActive = oldActive
+		supervisorSystemctlUserAvailable = oldAvailable
+	})
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	unit, err := os.ReadFile(supervisorSystemdServicePath())
+	if err != nil {
+		t.Fatalf("reading installed unit: %v", err)
+	}
+	if strings.Contains(string(unit), "sk-openai-secret-123") {
+		t.Fatalf("installed unit contains the credential value:\n%s", string(unit))
+	}
+
+	info, err := os.Stat(supervisorSecretsEnvFilePath())
+	if err != nil {
+		t.Fatalf("Stat(secrets file): %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("secrets file mode = %03o, want 600", got)
+	}
+	if got := readSupervisorSecretsEnvFile(t); got["OPENAI_API_KEY"] != "sk-openai-secret-123" {
+		t.Fatalf("secrets file[OPENAI_API_KEY] = %q, want %q", got["OPENAI_API_KEY"], "sk-openai-secret-123")
 	}
 }
 

@@ -767,6 +767,15 @@ func wakeDemandOverridesSleepSuppression(
 	if hasDemand && policy.Class == config.SessionSleepNonInteractive {
 		return true
 	}
+	// Routed demand for a configured named session targets exactly this
+	// session, so it must override the interactive idle window too —
+	// assigned-work is already handled above. Without this, an asleep
+	// on_demand named session whose sleep_reason=idle fingerprint still
+	// matches the active policy is suppressed on every tick and the work
+	// routed to it strands until a human pins the session (gc-ipr).
+	if decision.Reason == "named-demand" {
+		return true
+	}
 	return decision.Reason == "min-active" && containsWakeReason(eval.Reasons, WakeConfig)
 }
 
@@ -2330,16 +2339,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		name := target.session.Metadata["session_name"]
 		decision := awakeDecisions[name]
 		if decision.ShouldWake && !pendingInteractionReady(sp, name) && target.session.Metadata["pin_awake"] != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
-			// Direct assigned work overrides sleep suppression for every
-			// sleep class — the assignment is session-specific, so a pool
-			// sibling cannot serve it. Pool-scale demand (poolDesired > 0)
-			// overrides suppression only for non-interactive sessions
-			// (matching the old evaluateWakeReasons behavior). Min-active
-			// city-stop revival is also config demand: stale detach metadata
-			// from before gc stop must not cancel the post-start guarantee.
-			// Interactive sessions honor their idle window against
-			// pool-scale demand — an idle chat session should still sleep
-			// to release resources.
+			// Active demand (poolDesired > 0 or direct assigned work)
+			// overrides sleep suppression for non-interactive sessions
+			// (matching the old evaluateWakeReasons behavior). Direct
+			// handoffs — work assigned to this session's identity or
+			// named-session demand — override for interactive sessions
+			// too (gc-ipr). Min-active city-stop revival is also config
+			// demand: stale detach metadata from before gc stop must not
+			// cancel the post-start guarantee. Generic pool demand leaves
+			// interactive sessions honoring their idle window — an idle
+			// chat session should still sleep to release resources.
 			// Explicit sleep_intent always wins — if the session has
 			// signaled it wants to sleep, honor that regardless of demand.
 			template := normalizedSessionTemplate(*target.session, cfg)

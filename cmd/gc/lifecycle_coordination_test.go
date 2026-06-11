@@ -324,6 +324,7 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferred(t *testing.T) {
 }
 
 func TestLifecycleCoordination_InitDirIfReadySkipsProviderForPostgresCityAndRig(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath, rigPath, _ := writeInheritedCityPostgresRigFixture(t, "")
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
@@ -363,6 +364,7 @@ func TestLifecycleCoordination_InitDirIfReadySkipsProviderForPostgresCityAndRig(
 }
 
 func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure(t *testing.T) {
+	enableManagedDoltForTest(t)
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -412,6 +414,7 @@ func TestLifecycleCoordination_InitDirIfReady_RetriesTransientManagedDoltFailure
 }
 
 func TestLifecycleCoordination_InitDirIfReady_RetriesManagedDoltSchemaNotReady(t *testing.T) {
+	enableManagedDoltForTest(t)
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)

@@ -130,9 +130,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if err != nil || portNum <= 0 {
 		return managedDoltStartReport{}, fmt.Errorf("invalid port %q", port)
 	}
-	if strings.TrimSpace(host) == "" {
-		host = "0.0.0.0"
-	}
+	host = normalizeManagedDoltListenHost(host)
 	if strings.TrimSpace(user) == "" {
 		user = "root"
 	}
@@ -560,6 +558,23 @@ func managedDoltSQLServerSysProcAttr() *syscall.SysProcAttr {
 		return nil
 	}
 	return &syscall.SysProcAttr{Setpgid: true}
+}
+
+// normalizeManagedDoltListenHost resolves the listener host for a managed
+// dolt server. Blank and wildcard hosts mean "all interfaces" (0.0.0.0) in
+// production, but in managed-dolt test mode they are pinned to loopback: a
+// test server that outlives its run must never expose a SQL endpoint beyond
+// the host (gc-6ut — the leaked /tmp/city server was bound 0.0.0.0).
+// Explicit non-wildcard hosts pass through unchanged in both modes.
+func normalizeManagedDoltListenHost(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" || host == "*" {
+		host = "0.0.0.0"
+	}
+	if host == "0.0.0.0" && managedDoltTestModeEnabled() {
+		return "127.0.0.1"
+	}
+	return host
 }
 
 func managedDoltTestWatchdogEnabled() bool {

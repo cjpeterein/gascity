@@ -42,7 +42,7 @@ func stubStoreHealthEvents(t *testing.T, ep events.Provider) {
 
 func TestCityStatusSnapshotOmitsStoreHealthWhenControllerStopped(t *testing.T) {
 	cfg := &config.City{Workspace: config.Workspace{Name: "city"}}
-	snapshot := collectCityStatusSnapshot(runtime.NewFake(), cfg, "/tmp/city", nil, io.Discard)
+	snapshot := collectCityStatusSnapshot(runtime.NewFake(), cfg, t.TempDir(), nil, io.Discard)
 	if snapshot.Summary.StoreHealth != nil {
 		t.Fatalf("StoreHealth = %+v, want nil when controller stopped", snapshot.Summary.StoreHealth)
 	}

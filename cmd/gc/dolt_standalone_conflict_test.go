@@ -285,6 +285,7 @@ func TestParseDoltPSCommandLineHandlesSpacedExecutablePath(t *testing.T) {
 // detection must surface as the standalone-bd error and ensureBeadsProvider
 // must not run.
 func TestStartBeadsLifecycleRefusesLiveStandaloneBdDolt(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	writeManagedBdCityFixture(t, cityPath)
 	proc := startStandaloneBdDoltLikeProcess(t, filepath.Join(cityPath, ".beads", "dolt"))
@@ -337,6 +338,7 @@ func TestStartBeadsLifecycleIgnoresStaleStandaloneBdPID(t *testing.T) {
 }
 
 func TestInitDirIfReadyDetectsStandaloneBdDoltAtProviderConvergence(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	writeManagedBdCityFixture(t, cityPath)
 	materializeBuiltinPacksForTest(t, cityPath)

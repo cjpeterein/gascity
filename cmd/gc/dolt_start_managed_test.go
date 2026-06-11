@@ -280,6 +280,33 @@ func TestManagedDoltStartFields(t *testing.T) {
 	}
 }
 
+// TestNormalizeManagedDoltListenHostKeepsTestServersOnLoopback pins the
+// gc-6ut hardening: servers booted under managed-dolt test mode must never
+// listen on all interfaces — a leaked test server bound 0.0.0.0 exposes a
+// SQL endpoint beyond the host.
+func TestNormalizeManagedDoltListenHostKeepsTestServersOnLoopback(t *testing.T) {
+	withManagedDoltTestMode(t, true)
+	for _, host := range []string{"", "0.0.0.0", " 0.0.0.0 ", "*"} {
+		if got := normalizeManagedDoltListenHost(host); got != "127.0.0.1" {
+			t.Errorf("normalizeManagedDoltListenHost(%q) = %q in test mode, want 127.0.0.1", host, got)
+		}
+	}
+	if got := normalizeManagedDoltListenHost("10.0.0.5"); got != "10.0.0.5" {
+		t.Errorf("normalizeManagedDoltListenHost(10.0.0.5) = %q, want explicit host passed through", got)
+	}
+}
+
+func TestNormalizeManagedDoltListenHostProductionKeepsWildcard(t *testing.T) {
+	withManagedDoltTestMode(t, false)
+	t.Setenv(managedDoltTestModeEnv, "")
+	if got := normalizeManagedDoltListenHost(""); got != "0.0.0.0" {
+		t.Errorf("normalizeManagedDoltListenHost(\"\") = %q in production mode, want 0.0.0.0", got)
+	}
+	if got := normalizeManagedDoltListenHost("0.0.0.0"); got != "0.0.0.0" {
+		t.Errorf("normalizeManagedDoltListenHost(0.0.0.0) = %q in production mode, want 0.0.0.0", got)
+	}
+}
+
 func withManagedDoltTestMode(t *testing.T, enabled bool) {
 	t.Helper()
 	old := managedDoltTestMode

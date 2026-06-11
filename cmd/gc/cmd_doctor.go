@@ -21,10 +21,11 @@ import (
 )
 
 var (
-	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
-	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
-	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
-	newDoctorDoltLocalOnlyCheck = doctor.NewDoltLocalOnlyRemoteCheck
+	newDoctorDoltServerCheck        = doctor.NewDoltServerCheck
+	newDoctorRigDoltServerCheck     = doctor.NewRigDoltServerCheck
+	newDoctorDoltBackupCheck        = doctor.NewDoltBackupCheck
+	newDoctorDoltLocalOnlyCheck     = doctor.NewDoltLocalOnlyRemoteCheck
+	newDoctorCityDoltLocalOnlyCheck = doctor.NewCityDoltLocalOnlyRemoteCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -333,6 +334,16 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	// Custom types check — city store.
 	register(doctor.NewCustomTypesCheck(cityPath, "city"))
+
+	// Dolt local-only remote check — city store. The city's own database
+	// (e.g. hq) is not represented in cfg.Rigs, so the per-rig loop below
+	// cannot cover it; a stray off-box remote on the city store would
+	// otherwise go undetected while the Dolt log fills with fetch errors
+	// (gc-gic4m). Gated to match the per-rig registration: managed bd
+	// scope only, skipped in GC_DOLT=skip environments.
+	if scopeUsesManagedBdStoreContract(cityPath, cityPath) && !gcDoltSkip() {
+		register(newDoctorCityDoltLocalOnlyCheck(cityPath, managedDoltDataDir))
+	}
 
 	// Per-rig checks. Skip effectively-suspended rigs — opening their
 	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).

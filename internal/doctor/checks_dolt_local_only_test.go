@@ -488,6 +488,131 @@ func TestDoltLocalOnlyRemoteCheck_RelativeRigPath(t *testing.T) {
 	}
 }
 
+// --- City-store variant (gc-gic4m) ---
+//
+// The city's own database (hq in the reference deployment) is not
+// represented in cfg.Rigs, so the per-rig constructor can never cover it.
+// A stray off-box remote landed on hq via a mistyped CLI command
+// (`dolt remote add mise WARN` — Dolt expands the schemeless URL arg to
+// https://doltremoteapi.dolthub.com/WARN) and produced recurring fetch
+// errors on every remote-triggering hq operation until manually removed.
+// The city variant gives the city store the same guard rigs already have.
+
+// TestCityDoltLocalOnlyRemoteCheck_Name verifies the city check identifier.
+func TestCityDoltLocalOnlyRemoteCheck_Name(t *testing.T) {
+	cityPath := t.TempDir()
+	c := NewCityDoltLocalOnlyRemoteCheck(cityPath, filepath.Join(cityPath, ".beads", "dolt"))
+	want := "city:dolt-local-only-remote"
+	if got := c.Name(); got != want {
+		t.Errorf("Name() = %q, want %q", got, want)
+	}
+}
+
+// TestCityDoltLocalOnlyRemoteCheck_StrayOffBoxRemote_Warns reproduces the
+// hq incident: a remote named "mise" pointing at
+// https://doltremoteapi.dolthub.com/WARN on the city store must warn and
+// offer a removal fix hint.
+func TestCityDoltLocalOnlyRemoteCheck_StrayOffBoxRemote_Warns(t *testing.T) {
+	cityPath := t.TempDir()
+	doltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	writeRigMetadata(t, cityPath, "hq")
+	writeRigConfigYAML(t, cityPath, localOnlyConfigYAML)
+	writeRepoStateWithRemotes(t, doltDataDir, "hq", map[string]string{
+		"mise": "https://doltremoteapi.dolthub.com/WARN",
+	})
+
+	c := NewCityDoltLocalOnlyRemoteCheck(cityPath, doltDataDir)
+	r := c.Run(&CheckContext{CityPath: cityPath})
+
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want StatusWarning; message=%s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "mise") {
+		t.Errorf("Message should name the offending remote %q: %s", "mise", r.Message)
+	}
+	if !strings.Contains(r.Message, "city store") {
+		t.Errorf("Message should identify the city store, not a rig: %s", r.Message)
+	}
+	if !strings.Contains(r.FixHint, "bd dolt remote remove mise") {
+		t.Errorf("FixHint should contain 'bd dolt remote remove mise': %s", r.FixHint)
+	}
+}
+
+// TestCityDoltLocalOnlyRemoteCheck_NotConfigured_OK verifies that a city
+// store without dolt.local-only stays OK even with an off-box remote —
+// remote sync may be intentional.
+func TestCityDoltLocalOnlyRemoteCheck_NotConfigured_OK(t *testing.T) {
+	cityPath := t.TempDir()
+	doltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	writeRigMetadata(t, cityPath, "hq")
+	writeRigConfigYAML(t, cityPath, "issue_prefix: em\n")
+	writeRepoStateWithRemotes(t, doltDataDir, "hq", map[string]string{
+		"mise": "https://doltremoteapi.dolthub.com/WARN",
+	})
+
+	c := NewCityDoltLocalOnlyRemoteCheck(cityPath, doltDataDir)
+	r := c.Run(&CheckContext{CityPath: cityPath})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d (%s), want StatusOK (local-only not configured)", r.Status, r.Message)
+	}
+}
+
+// TestCityDoltLocalOnlyRemoteCheck_LocalBackupOnly_OK verifies that the
+// city store's file:// backup remotes are not flagged as off-box.
+func TestCityDoltLocalOnlyRemoteCheck_LocalBackupOnly_OK(t *testing.T) {
+	cityPath := t.TempDir()
+	doltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	writeRigMetadata(t, cityPath, "hq")
+	writeRigConfigYAML(t, cityPath, localOnlyConfigYAML)
+	writeRepoStateWithRemotes(t, doltDataDir, "hq", map[string]string{
+		"hq-backup": "file://" + filepath.Join(cityPath, "backups", "hq"),
+	})
+
+	c := NewCityDoltLocalOnlyRemoteCheck(cityPath, doltDataDir)
+	r := c.Run(&CheckContext{CityPath: cityPath})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d (%s), want StatusOK (file:// backup remote is local)", r.Status, r.Message)
+	}
+}
+
+// TestCityDoltLocalOnlyRemoteCheck_Fix_RemovesFromCityStore verifies that
+// Fix() passes the city path as the store path so `bd dolt remote remove`
+// resolves the city's own database, and removes only the off-box remote.
+func TestCityDoltLocalOnlyRemoteCheck_Fix_RemovesFromCityStore(t *testing.T) {
+	cityPath := t.TempDir()
+	doltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	writeRigMetadata(t, cityPath, "hq")
+	writeRigConfigYAML(t, cityPath, localOnlyConfigYAML)
+	writeRepoStateWithRemotes(t, doltDataDir, "hq", map[string]string{
+		"mise":      "https://doltremoteapi.dolthub.com/WARN",
+		"hq-backup": "file://" + filepath.Join(cityPath, "backups", "hq"),
+	})
+
+	c := NewCityDoltLocalOnlyRemoteCheck(cityPath, doltDataDir)
+	var gotPath, gotRemote string
+	calls := 0
+	c.removeRemote = func(storePath, remoteName string) error {
+		calls++
+		gotPath, gotRemote = storePath, remoteName
+		return nil
+	}
+
+	if err := c.Fix(&CheckContext{CityPath: cityPath}); err != nil {
+		t.Fatalf("Fix() error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("removeRemote called %d times, want 1", calls)
+	}
+	if gotRemote != "mise" {
+		t.Errorf("removeRemote remote = %q, want %q", gotRemote, "mise")
+	}
+	if gotPath != cityPath {
+		t.Errorf("removeRemote store path = %q, want city path %q", gotPath, cityPath)
+	}
+}
+
 // TestDoltLocalOnlyRemoteCheck_DBNameFromMetadata verifies that the check
 // resolves the Dolt database name from .beads/metadata.json when present,
 // so the repo_state.json lookup uses the correct database directory.

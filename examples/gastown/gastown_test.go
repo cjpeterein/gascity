@@ -87,7 +87,7 @@ func assertCurrentWispBurnsGuarded(t *testing.T, name, body string) {
 	}
 }
 
-func refineryMergePushDescription(t *testing.T) string {
+func refineryStepDescription(t *testing.T, id string) string {
 	t.Helper()
 	parser := formula.NewParser(gastownFormulaSearchPaths()...)
 	f, err := parser.ParseFile(filepath.Join(exampleDir(), "packs", "gastown", "formulas", "mol-refinery-patrol.toml"))
@@ -95,12 +95,17 @@ func refineryMergePushDescription(t *testing.T) string {
 		t.Fatalf("parsing refinery formula: %v", err)
 	}
 	for _, step := range f.Steps {
-		if step.ID == "merge-push" {
+		if step.ID == id {
 			return step.Description
 		}
 	}
-	t.Fatal("refinery formula missing merge-push step")
+	t.Fatalf("refinery formula missing %s step", id)
 	return ""
+}
+
+func refineryMergePushDescription(t *testing.T) string {
+	t.Helper()
+	return refineryStepDescription(t, "merge-push")
 }
 
 func extractBetween(t *testing.T, body, startMarker, endMarker string) string {
@@ -518,14 +523,16 @@ func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
 	)
 
 	// Both terminal handoffs call the shared predicate before closing.
-	if count := strings.Count(body, `branch_has_real_change "origin/$TARGET" temp ||`); count != 2 {
+	// $TARGET_REF resolves to origin/$TARGET on remote rigs and to the
+	// bare local $TARGET on local-only rigs (gc-qbywr).
+	if count := strings.Count(body, `branch_has_real_change "$TARGET_REF" temp ||`); count != 2 {
 		t.Fatalf("expected the guard at both the direct-merge and mr/pr handoff sites, found %d call sites", count)
 	}
 
 	// Direct close-as-merged path: guard precedes the merge and the close.
 	assertContainsInOrder(t, body,
 		`**If MERGE_STRATEGY = "direct" (default):**`,
-		`branch_has_real_change "origin/$TARGET" temp ||`,
+		`branch_has_real_change "$TARGET_REF" temp ||`,
 		"git merge --ff-only temp",
 		`gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
@@ -533,7 +540,7 @@ func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
 	// mr/pr publication path: guard precedes the push and the close.
 	assertContainsInOrder(t, body,
 		`**If MERGE_STRATEGY = "mr":**`,
-		`branch_has_real_change "origin/$TARGET" temp ||`,
+		`branch_has_real_change "$TARGET_REF" temp ||`,
 		"git push origin HEAD:$BRANCH --force-with-lease",
 		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
 	)
@@ -614,6 +621,145 @@ func TestRefineryBranchHasRealChangeExec(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRefineryFormulaSupportsLocalOnlyRigs guards the gc-qbywr fix: the
+// rebase and merge-push steps previously hardcoded `origin` (fetch,
+// origin/$BRANCH, origin/$TARGET, push), so a refinery in a local-only
+// rig — no git remote; every agent workspace is a git worktree of the
+// rig root sharing one object database — failed at `git fetch --prune
+// origin` and was permanently blocked. The formula now detects the
+// missing remote per step and falls back to bare local refs, with the
+// fast-forward landing in whichever worktree has the target branch
+// checked out (normally the rig root, which git refuses to check out
+// a second time).
+func TestRefineryFormulaSupportsLocalOnlyRigs(t *testing.T) {
+	rebase := refineryStepDescription(t, "rebase")
+	if strings.Contains(rebase, "git checkout -b temp origin/$BRANCH") {
+		t.Error("rebase step still hardcodes origin/$BRANCH; local-only rigs have no origin remote")
+	}
+	assertContainsInOrder(t, rebase,
+		"if git remote get-url origin >/dev/null 2>&1; then",
+		"git fetch --prune origin",
+		`BRANCH_REF="origin/$BRANCH"`,
+		`TARGET_REF="origin/$TARGET"`,
+		`BRANCH_REF="$BRANCH"`,
+		`TARGET_REF="$TARGET"`,
+		`git checkout -b temp "$BRANCH_REF"`,
+		`git rebase "$TARGET_REF"`,
+	)
+	// The rejection SHA must resolve in both modes; origin/$TARGET does
+	// not exist on a local-only rig.
+	if !strings.Contains(rebase, `$(git rev-parse "$TARGET_REF")`) {
+		t.Error("rebase rejection metadata should resolve the conflict SHA via $TARGET_REF")
+	}
+
+	handle := refineryStepDescription(t, "handle-failures")
+	assertContainsInOrder(t, handle,
+		"git remote get-url origin >/dev/null 2>&1 && git push origin --delete $BRANCH",
+		"do NOT delete `$BRANCH`",
+		"git checkout --detach && git branch -D temp",
+	)
+
+	merge := refineryMergePushDescription(t)
+	assertContainsInOrder(t, merge,
+		"if git remote get-url origin >/dev/null 2>&1; then",
+		"HAS_ORIGIN=1",
+		`TARGET_REF="origin/$TARGET"`,
+		"HAS_ORIGIN=0",
+		`TARGET_REF="$TARGET"`,
+	)
+	// Direct mode merges in the worktree that owns $TARGET: the rig root
+	// keeps the target branch checked out, so a plain checkout fails.
+	assertContainsInOrder(t, merge,
+		"TEMP_SHA=$(git rev-parse temp)",
+		"git worktree list --porcelain",
+		`git -C "$TARGET_WT" merge --ff-only "$TEMP_SHA"`,
+	)
+	// Local-only verification compares the target ref to the merged SHA;
+	// there is no origin/$TARGET to fetch and compare.
+	if !strings.Contains(merge, `[ "$(git rev-parse "$TARGET")" = "$TEMP_SHA" ]`) {
+		t.Error("merge-push missing local-only merge verification")
+	}
+	// A pull-request handoff is impossible without a GitHub origin:
+	// escalate to mayor instead of looping on "debug and retry".
+	if !strings.Contains(merge, "ESCALATION: merge_strategy=mr on local-only rig") {
+		t.Error("merge-push missing mr-on-local-only escalation")
+	}
+}
+
+// TestRefineryLocalOnlyMergeExec runs the extracted local-only rebase and
+// merge shell from the formula against the real worktree topology of a
+// local-only rig: the rig root holds the target branch checked out, the
+// refinery works in a sibling worktree, and the polecat branch exists
+// only as a local ref. It certifies the fallback fast-forwards the
+// target in the worktree that owns it — and still works when no
+// worktree has the target checked out.
+func TestRefineryLocalOnlyMergeExec(t *testing.T) {
+	rebaseSnippet := extractBetween(t, refineryStepDescription(t, "rebase"),
+		"if git remote get-url origin >/dev/null 2>&1; then", "\n```")
+	mergeSnippet := extractBetween(t, refineryMergePushDescription(t),
+		"TEMP_SHA=$(git rev-parse temp)", "\nfi\n```")
+
+	run := func(t *testing.T, detachRigRoot bool) {
+		base := t.TempDir()
+		rigRoot := filepath.Join(base, "rigroot")
+		refinery := filepath.Join(base, "refinery")
+		git := func(dir string, args ...string) string {
+			return runCmd(t, dir, "git", append([]string{"-C", dir}, args...)...)
+		}
+		commit := func(dir, msg string) {
+			git(dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", msg)
+		}
+		write := func(dir, name, content string) {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+				t.Fatalf("writing %s: %v", name, err)
+			}
+		}
+
+		if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+			t.Fatalf("creating rig root: %v", err)
+		}
+		git(rigRoot, "init", "-q", "-b", "main")
+		write(rigRoot, "base.txt", "base\n")
+		git(rigRoot, "add", "base.txt")
+		commit(rigRoot, "base")
+
+		// Refinery worktree stays detached; main remains checked out at
+		// the rig root, exactly like a live rig.
+		git(rigRoot, "worktree", "add", "--detach", refinery, "main")
+
+		// The polecat branch is a local ref carrying one commit.
+		git(refinery, "checkout", "-q", "-b", "polecat/x", "main")
+		write(refinery, "feature.txt", "feature\n")
+		git(refinery, "add", "feature.txt")
+		commit(refinery, "feature")
+		git(refinery, "checkout", "-q", "--detach")
+
+		if detachRigRoot {
+			git(rigRoot, "checkout", "-q", "--detach")
+		}
+
+		script := "set -e\nBRANCH=polecat/x\nTARGET=main\n" + rebaseSnippet + "\n" + mergeSnippet + "\n"
+		cmd := exec.Command("sh", "-c", script)
+		cmd.Dir = refinery
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("local-only rebase+merge: %v\n%s", err, out)
+		}
+
+		want := git(refinery, "rev-parse", "polecat/x")
+		if got := git(refinery, "rev-parse", "main"); got != want {
+			t.Fatalf("main = %s, want fast-forward to %s", got, want)
+		}
+		if !detachRigRoot {
+			if _, err := os.Stat(filepath.Join(rigRoot, "feature.txt")); err != nil {
+				t.Errorf("rig root working tree not updated by fast-forward: %v", err)
+			}
+		}
+	}
+
+	t.Run("target_checked_out_at_rig_root", func(t *testing.T) { run(t, false) })
+	t.Run("no_worktree_holds_target", func(t *testing.T) { run(t, true) })
 }
 
 // TestRefineryPromptRejectionFlowEnforcesClearOnMerge guards against

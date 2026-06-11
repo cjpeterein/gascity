@@ -353,6 +353,7 @@ alert the witness, not `gc mail send`.
 | Rebase on target | `git rebase origin/$TARGET` |
 | Fast-forward merge | `git merge --ff-only temp` |
 | Push merged changes | `git push origin $TARGET` |
+| Local-only rig (no origin) | Skip fetch/push: rebase on `$TARGET`, fast-forward in the worktree owning it (formula rebase/merge-push steps carry the exact fallback) |
 
 Rig: {{ .RigName }}
 Working directory: {{ .WorkDir }}

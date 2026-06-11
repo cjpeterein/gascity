@@ -23,6 +23,11 @@ Merge strategy is per-work-bead metadata:
 - `direct` (default): fast-forward merge to target and push
 - `mr` / `pr`: publish a GitHub pull request instead of landing directly
 
+Local-only rigs (no `origin` remote) are supported in `direct` mode:
+branches are bare local refs in the shared rig repository and the
+fast-forward lands in the worktree that owns the target branch. `mr`
+mode requires a GitHub origin and escalates when none exists.
+
 In `mr` mode, refinery treats PR publication as the terminal handoff for
 the direct-bead workflow: it records the PR URL on the work bead and
 closes the bead once the PR is verified.
@@ -212,11 +217,21 @@ BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
 ```
 
-Fetch and attempt mechanical rebase:
+Resolve refs and attempt mechanical rebase. Local-only rigs (no `origin`
+remote) skip the fetch: polecat branches are local refs in the shared
+rig repository — every agent workspace is a git worktree of the rig
+root — so the bare local refs are authoritative.
 ```bash
-git fetch --prune origin
-git checkout -b temp origin/$BRANCH
-git rebase origin/$TARGET
+if git remote get-url origin >/dev/null 2>&1; then
+  git fetch --prune origin
+  BRANCH_REF="origin/$BRANCH"
+  TARGET_REF="origin/$TARGET"
+else
+  BRANCH_REF="$BRANCH"
+  TARGET_REF="$TARGET"
+fi
+git checkout -b temp "$BRANCH_REF"
+git rebase "$TARGET_REF"
 ```
 
 If rebase SUCCEEDED (exit 0): close this step, proceed to run-tests.
@@ -233,11 +248,13 @@ gc workflow delete-source $WORK --apply && gc workflow reopen-source $WORK
 gc bd update $WORK \
   --status=open \
   --assignee="" \
-  --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse origin/$TARGET)" \
+  --set-metadata rejection_reason="Conflicts with $TARGET at $(git rev-parse "$TARGET_REF")" \
   --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
 ```
 4. Do NOT delete the branch (new polecat needs it for conflict resolution).
-5. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
+5. Clean up temp branch: `git checkout --detach && git branch -D temp`
+   ({{target_branch}} may be checked out in another worktree — detach
+   instead of switching to it)
 6. Pour next patrol iteration before burning:
 ```bash
 CURRENT_WISP=${GC_BEAD_ID:-}
@@ -337,8 +354,11 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
        --set-metadata rejection_reason="<failure summary>" \
        --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
      ```
-   - Delete branch: `git push origin --delete $BRANCH`
-   - Clean up: `git checkout "$TARGET" && git branch -D temp`
+   - Delete the remote branch copy (remote rigs only):
+     `git remote get-url origin >/dev/null 2>&1 && git push origin --delete $BRANCH`
+     On a local-only rig do NOT delete `$BRANCH` — the local ref is the
+     only copy of the work and the next polecat's resume point.
+   - Clean up: `git checkout --detach && git branch -D temp`
    - Pour next patrol iteration before burning:
      ```bash
      CURRENT_WISP=${GC_BEAD_ID:-}
@@ -395,8 +415,20 @@ BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
 MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"')
 EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
+if git remote get-url origin >/dev/null 2>&1; then
+  HAS_ORIGIN=1
+  TARGET_REF="origin/$TARGET"
+else
+  # Local-only rig: no origin remote. Merge against bare local refs and
+  # land the fast-forward in the worktree that owns $TARGET.
+  HAS_ORIGIN=0
+  TARGET_REF="$TARGET"
+fi
 ORIGIN_REPO_ERROR=""
-if command -v gh >/dev/null 2>&1; then
+ORIGIN_REPO=""
+if [ "$HAS_ORIGIN" = 0 ]; then
+  ORIGIN_REPO_ERROR="No origin remote configured; pull-request handoff requires a GitHub origin."
+elif command -v gh >/dev/null 2>&1; then
   if ! ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>&1); then
     ORIGIN_REPO_ERROR="gh repo view failed while resolving origin repository: $ORIGIN_REPO"
     ORIGIN_REPO=""
@@ -419,6 +451,17 @@ fi
 if [ -n "$EXISTING_PR" ] && [ "$MERGE_STRATEGY" = "direct" ]; then
   echo "metadata.existing_pr requires pull-request handoff; using merge_strategy=mr."
   MERGE_STRATEGY="mr"
+fi
+
+if [ "$MERGE_STRATEGY" = "mr" ] && [ "$HAS_ORIGIN" = 0 ]; then
+  gc mail send mayor/ -s "ESCALATION: merge_strategy=mr on local-only rig" -m "Work bead: $WORK
+Branch: $BRANCH
+Target: $TARGET
+This rig has no origin remote, so a pull-request handoff is impossible.
+Use merge_strategy=direct or configure a GitHub origin for the rig."
+  echo "STOP. merge_strategy=mr requires a GitHub origin remote; escalated to mayor."
+  gc runtime drain-ack
+  exit 1
 fi
 
 block_existing_pr() {
@@ -684,25 +727,46 @@ change vs its merge-base merging is definitionally false. Refuse it before
 touching `$TARGET`. Legit no-op resolutions MUST use wontfix/duplicate/
 not-planned, never merged — so this never blocks a real merge.
 ```bash
-branch_has_real_change "origin/$TARGET" temp || \
-  halt_false_completion "$BRANCH" "$(git merge-base "origin/$TARGET" temp 2>/dev/null || printf '%s' "origin/$TARGET")"
+branch_has_real_change "$TARGET_REF" temp || \
+  halt_false_completion "$BRANCH" "$(git merge-base "$TARGET_REF" temp 2>/dev/null || printf '%s' "$TARGET_REF")"
 ```
 
-**1. Merge and push target branch:**
+**1. Merge (and push when a remote exists):**
+
+On a local-only rig the target branch is normally checked out in the
+rig-root worktree and git refuses to check it out a second time, so the
+fast-forward runs in the worktree that owns it. If that merge refuses
+because the owning working tree is dirty, STOP and escalate to the
+witness — never force, stash, or reset a checkout you do not own.
 ```bash
-git checkout $TARGET
-git merge --ff-only temp
-git push origin $TARGET
+if [ "$HAS_ORIGIN" = 1 ]; then
+  git checkout $TARGET
+  git merge --ff-only temp
+  git push origin $TARGET
+else
+  TEMP_SHA=$(git rev-parse temp)
+  TARGET_WT=$(git worktree list --porcelain | awk -v ref="refs/heads/$TARGET" '/^worktree /{wt=substr($0,10)} $0=="branch "ref{print wt}')
+  if [ -n "$TARGET_WT" ]; then
+    git -C "$TARGET_WT" merge --ff-only "$TEMP_SHA"
+  else
+    git checkout "$TARGET"
+    git merge --ff-only "$TEMP_SHA"
+  fi
+fi
 ```
 
-**2. Verify push:**
+**2. Verify the target advanced:**
 ```bash
-git fetch origin
-LOCAL=$(git rev-parse $TARGET)
-REMOTE=$(git rev-parse origin/$TARGET)
-[ "$LOCAL" = "$REMOTE" ] || echo "PUSH FAILED — do not proceed"
+if [ "$HAS_ORIGIN" = 1 ]; then
+  git fetch origin
+  LOCAL=$(git rev-parse $TARGET)
+  REMOTE=$(git rev-parse origin/$TARGET)
+  [ "$LOCAL" = "$REMOTE" ] || echo "PUSH FAILED — do not proceed"
+else
+  [ "$(git rev-parse "$TARGET")" = "$TEMP_SHA" ] || echo "MERGE FAILED — do not proceed"
+fi
 ```
-If SHAs differ: STOP. Debug and retry. Do NOT continue.
+If verification fails: STOP. Debug and retry. Do NOT continue.
 
 **3. Record merge metadata and close work bead:**
 
@@ -715,8 +779,8 @@ clears any stale rejection field from an earlier rejected/reworked
 attempt before the successful close.
 
 ```bash
-MERGED_SHA=$(git rev-parse HEAD) && \
-MERGED_SHORT=$(git rev-parse --short HEAD) && \
+MERGED_SHA=$(git rev-parse "$TARGET") && \
+MERGED_SHORT=$(git rev-parse --short "$TARGET") && \
 gc bd update $WORK \
   --set-metadata merge_result=merged \
   --set-metadata merged_sha=$MERGED_SHA \
@@ -727,9 +791,12 @@ gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"
 
 **4. Cleanup:**
 ```bash
+git checkout --detach
 git branch -d temp
 ```
-If delete_merged_branches = "true": `git push origin --delete $BRANCH`
+If delete_merged_branches = "true":
+- Remote rig: `git push origin --delete $BRANCH`
+- Local-only rig: `git branch -D "$BRANCH" 2>/dev/null || echo "branch $BRANCH is checked out in another worktree; worktree cleanup will reap it"`
 
 **If MERGE_STRATEGY = "mr":**
 
@@ -743,8 +810,8 @@ pull request for a branch that introduces no change vs its merge-base. The
 PR handoff closes the bead, so an empty PR is the same false completion as
 an empty direct merge.
 ```bash
-branch_has_real_change "origin/$TARGET" temp || \
-  halt_false_completion "$BRANCH" "$(git merge-base "origin/$TARGET" temp 2>/dev/null || printf '%s' "origin/$TARGET")"
+branch_has_real_change "$TARGET_REF" temp || \
+  halt_false_completion "$BRANCH" "$(git merge-base "$TARGET_REF" temp 2>/dev/null || printf '%s' "$TARGET_REF")"
 ```
 
 **1. Push the rebased branch back to origin:**
@@ -967,7 +1034,7 @@ gc bd close $WORK --reason "Pull request ready: $PR_URL"
 
 **5. Cleanup:**
 ```bash
-git checkout "$TARGET"
+git checkout --detach
 git branch -d temp
 ```
 Do NOT delete `$BRANCH` in mr mode — GitHub pull requests need the source branch.

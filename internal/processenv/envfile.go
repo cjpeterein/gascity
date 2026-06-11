@@ -18,7 +18,9 @@ import (
 // Values are treated literally otherwise: there is no variable interpolation
 // and no inline-comment stripping on unquoted values (a '#' mid-value is kept).
 // A line missing '=' or with an empty key is a parse error so a malformed
-// secrets file fails loudly rather than silently dropping a credential. The
+// secrets file fails loudly rather than silently dropping a credential. Parse
+// errors carry only the line number, never the line content — the input is
+// typically a secrets file and errors flow to stderr and service logs. The
 // last assignment wins when a key repeats.
 func ParseEnvFile(content string) (map[string]string, error) {
 	out := make(map[string]string)
@@ -30,11 +32,11 @@ func ParseEnvFile(content string) (map[string]string, error) {
 		line = strings.TrimPrefix(line, "export ")
 		key, val, ok := strings.Cut(line, "=")
 		if !ok {
-			return nil, fmt.Errorf("line %d: missing '=' in %q", i+1, raw)
+			return nil, fmt.Errorf("line %d: missing '='", i+1)
 		}
 		key = strings.TrimSpace(key)
 		if key == "" {
-			return nil, fmt.Errorf("line %d: empty key in %q", i+1, raw)
+			return nil, fmt.Errorf("line %d: empty key", i+1)
 		}
 		out[key] = unquoteEnvValue(strings.TrimSpace(val))
 	}
@@ -52,4 +54,36 @@ func unquoteEnvValue(val string) string {
 		return val[1 : len(val)-1]
 	}
 	return val
+}
+
+// QuoteEnvValue renders val so a KEY=<rendered> line parses back to exactly
+// val under ParseEnvFile's rules. Values that survive the parser's trim and
+// unquote untouched are written bare; anything else (surrounding whitespace,
+// quote-wrapped lookalikes) gains one layer of double quotes, which the
+// parser strips while preserving the interior verbatim. Values containing
+// line breaks cannot be represented in the line-oriented format; callers
+// must reject them before writing.
+func QuoteEnvValue(val string) string {
+	if val == unquoteEnvValue(strings.TrimSpace(val)) {
+		return val
+	}
+	return `"` + val + `"`
+}
+
+// EnvFileAssignmentKey returns the key a dotenv line assigns, applying the
+// same per-line rules as ParseEnvFile, and false for blank lines, comments,
+// and malformed lines. It lets callers patch an env file line-by-line
+// without re-implementing the format.
+func EnvFileAssignmentKey(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", false
+	}
+	trimmed = strings.TrimPrefix(trimmed, "export ")
+	key, _, ok := strings.Cut(trimmed, "=")
+	if !ok {
+		return "", false
+	}
+	key = strings.TrimSpace(key)
+	return key, key != ""
 }

@@ -146,6 +146,23 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
+
+	// Read-only hooks on the standard work query serve from the supervisor
+	// cache when an API endpoint is reachable: three cached HTTP reads
+	// (sessions, ready, in_progress) replace the per-store bd subprocess
+	// swarm the script spawns plus the store-backed session-name lookup,
+	// which the tmux status line otherwise multiplies into hundreds of
+	// data-plane queries per second (gc-lqt). Custom work queries keep
+	// their caller-owned shell contract, and --claim keeps the
+	// authoritative shell + bd path because claims must observe and mutate
+	// live store state. Any API failure falls through to the shell path
+	// below, so a degraded supervisor never hides work.
+	if !opts.Claim && a.WorkQuery == "" {
+		if code, served := tryServeHookFromSupervisorCache(cityPath, cityName, cfg.Workspace.SessionTemplate, &a, sessionTemplateContext, stdout, stderr); served {
+			return code
+		}
+	}
+
 	workQuery := a.EffectiveWorkQueryForBeads(cfg.Beads)
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side

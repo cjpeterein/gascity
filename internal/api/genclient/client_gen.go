@@ -5184,6 +5184,9 @@ type GetV0CityByCityNameBeadsParams struct {
 
 	// All Include closed beads.
 	All *bool `form:"all,omitempty" json:"all,omitempty"`
+
+	// Cached Serve from the supervisor cache when possible. Opts out of the live lifecycle-gate read for status=in_progress; results may lag direct backing-store writes by one cache reconcile interval.
+	Cached *bool `form:"cached,omitempty" json:"cached,omitempty"`
 }
 
 // CreateBeadParams defines parameters for CreateBead.
@@ -5202,6 +5205,9 @@ type GetV0CityByCityNameBeadsReadyParams struct {
 
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
+
+	// Cached Serve from the supervisor cache when possible, falling back to a live read per rig when the cache cannot answer. Results may lag direct backing-store writes by one cache reconcile interval.
+	Cached *bool `form:"cached,omitempty" json:"cached,omitempty"`
 }
 
 // DeleteV0CityByCityNameConvoyByIdParams defines parameters for DeleteV0CityByCityNameConvoyById.
@@ -15625,6 +15631,22 @@ func NewGetV0CityByCityNameBeadsRequest(server string, cityName string, params *
 
 		}
 
+		if params.Cached != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "cached", *params.Cached, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -15796,6 +15818,22 @@ func NewGetV0CityByCityNameBeadsReadyRequest(server string, cityName string, par
 		if params.Wait != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wait", *params.Wait, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cached != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "cached", *params.Cached, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

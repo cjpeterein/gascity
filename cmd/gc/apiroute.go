@@ -89,6 +89,27 @@ func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 	return loadedCityName(cfg, cityPath)
 }
 
+// supervisorCacheReadClient resolves an API client for read-only commands
+// that prefer supervisor-cache serving over their local fallback (gc hook,
+// gc mail check — the status-line render path). It extends apiClient with
+// the maintenance-style fall-through (ga-tp7): a supervisor-managed city
+// omits a standalone [api] port, so apiClient returns nil even though the
+// controller socket is alive; route those reads to the supervisor-managed
+// client instead of dropping to per-call bd shellouts. Returns nil when no
+// API endpoint is reachable or under the GC_NO_API escape hatch; callers
+// keep their local fallback for that case.
+func supervisorCacheReadClient(cityPath string) *api.Client {
+	if c := apiClient(cityPath); c != nil {
+		return c
+	}
+	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); !disabled {
+		if apiRouteControllerAliveHook(cityPath) != 0 {
+			return apiRouteSupervisorClientHook(cityPath)
+		}
+	}
+	return nil
+}
+
 // apiClientFallbackReason returns a reason code describing why apiClient
 // returned nil for cityPath. Read-path CLI commands call this when the
 // client is nil to emit a route=fallback reason=<code> log line.

@@ -8180,6 +8180,8 @@ export interface operations {
                 rig?: string;
                 /** @description Include closed beads. */
                 all?: boolean;
+                /** @description Serve from the supervisor cache when possible. Opts out of the live lifecycle-gate read for status=in_progress; results may lag direct backing-store writes by one cache reconcile interval. */
+                cached?: boolean;
             };
             header?: never;
             path: {
@@ -8304,6 +8306,8 @@ export interface operations {
                 index?: string;
                 /** @description How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m. */
                 wait?: string;
+                /** @description Serve from the supervisor cache when possible, falling back to a live read per rig when the cache cannot answer. Results may lag direct backing-store writes by one cache reconcile interval. */
+                cached?: boolean;
             };
             header?: never;
             path: {

@@ -939,6 +939,14 @@ func managedLocalDoltEnv(env map[string]string) bool {
 }
 
 func managedBDRecoveryAllowed(cityPath, scopeRoot string, env map[string]string) bool {
+	// GC_DOLT=skip is the operator's (and the test harness's) declaration
+	// that gc must not manage a Dolt server. Every other managed-dolt entry
+	// point honors it (ensureBeadsProvider, initBeadsForDir, doctor); the
+	// transport-recovery path must too, or a bd connection failure boots a
+	// real server behind the operator's back (gc-6ut).
+	if gcDoltSkip() {
+		return false
+	}
 	if scopeRoot == "" {
 		scopeRoot = cityPath
 	}

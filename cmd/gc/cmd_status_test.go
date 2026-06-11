@@ -273,7 +273,7 @@ func TestDoRigStatusReportsObservationErrors(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runDoRigStatus(sp, dops, rig, agents, "/tmp/city", &stdout, &stderr)
+	code := runDoRigStatus(sp, dops, rig, agents, t.TempDir(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}

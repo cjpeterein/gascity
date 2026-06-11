@@ -81,6 +81,10 @@ func clearGCEnv(t *testing.T) {
 		t.Setenv(k, "")
 	}
 	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+	// Restore the package-wide managed-dolt default-off the scrub above just
+	// erased (see TestMain). Tests that exercise managed-dolt behavior opt in
+	// with t.Setenv("GC_DOLT", "") after calling clearGCEnv.
+	t.Setenv("GC_DOLT", "skip")
 }
 
 func clearProcessLiveEnvForTests() {
@@ -121,6 +125,24 @@ func TestRepoCacheRootNeverResolvesToRealUserHome(t *testing.T) {
 	}
 	if root == liveCache {
 		t.Fatalf("RepoCacheRoot resolved to the live shared cache %q; the test harness must isolate it via GC_HOME or GC_REPO_CACHE_ROOT", liveCache)
+	}
+}
+
+// TestPackageDefaultDisablesManagedDolt pins the gc-6ut central guard:
+// TestMain exports GC_DOLT=skip for the whole package so a test that reaches
+// a store-open or bd transport-recovery path cannot boot a real managed dolt
+// server by default. Tests that exercise managed-dolt behavior must opt in
+// explicitly with t.Setenv("GC_DOLT", "").
+func TestPackageDefaultDisablesManagedDolt(t *testing.T) {
+	if os.Getenv("GC_DOLT") != "skip" {
+		t.Fatalf("GC_DOLT = %q, want package-wide %q default from TestMain", os.Getenv("GC_DOLT"), "skip")
+	}
+}
+
+func TestClearGCEnvRestoresManagedDoltSkipDefault(t *testing.T) {
+	clearGCEnv(t)
+	if os.Getenv("GC_DOLT") != "skip" {
+		t.Fatalf("GC_DOLT = %q after clearGCEnv, want restored %q default", os.Getenv("GC_DOLT"), "skip")
 	}
 }
 
@@ -251,6 +273,18 @@ func disableManagedDoltRecoveryForTest(t *testing.T) {
 	t.Setenv("GC_DOLT_PORT", "")
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+}
+
+// enableManagedDoltForTest opts a test back into the managed-dolt behavior
+// that the package-wide GC_DOLT=skip default (set in TestMain, gc-6ut)
+// disables. Only tests that assert managed-dolt lifecycle behavior — provider
+// start/recover, transport-recovery classification, doctor dolt checks —
+// should call this; the spawn-side test watchdog and the TestMain leak guard
+// still bound any server such a test boots. Call after clearGCEnv, which
+// restores the skip default.
+func enableManagedDoltForTest(t *testing.T) {
+	t.Helper()
+	t.Setenv("GC_DOLT", "")
 }
 
 var testProviderStubCommands = []string{

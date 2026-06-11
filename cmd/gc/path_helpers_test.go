@@ -118,14 +118,68 @@ type doltLeakGuardedTestingM struct {
 	m            *testing.M
 	tempRoot     string
 	cleanupPaths []string
+	// attributedToParent reports whether a dolt process belongs to this test
+	// run even when its --config path lives outside tempRoot. Managed dolt
+	// servers booted for fixed city paths (gc-6ut: the literal /tmp/city)
+	// carry GC_MANAGED_DOLT_TEST_PARENT_PID in their environment; matching it
+	// against our PID is the only reliable ownership signal once the spawning
+	// process tree has exited.
+	attributedToParent func(pid int) bool
 }
 
 func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
+	parentPID := os.Getpid()
 	return &doltLeakGuardedTestingM{
 		m:            m,
 		tempRoot:     tempRoot,
 		cleanupPaths: cleanupPaths,
+		attributedToParent: func(pid int) bool {
+			environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+			if err != nil {
+				// No /proc (macOS) or process gone: fall back to the
+				// config-path scan alone.
+				return false
+			}
+			return environAttributesDoltToTestParent(environ, parentPID)
+		},
 	}
+}
+
+// environAttributesDoltToTestParent reports whether a NUL-separated
+// /proc/<pid>/environ blob carries GC_MANAGED_DOLT_TEST_PARENT_PID equal to
+// parentPID. The marker is exported by TestMain and inherited through every
+// spawn route a test can take to a managed dolt server — the Go start path,
+// the gc-beads-bd.sh provider script, and the script's direct nohup fallback —
+// so it attributes servers the config-path scan cannot (configs outside the
+// test temp root).
+func environAttributesDoltToTestParent(environ []byte, parentPID int) bool {
+	want := fmt.Sprintf("%s=%d", managedDoltTestParentPIDEnv, parentPID)
+	for _, entry := range strings.Split(string(environ), "\x00") {
+		if entry == want {
+			return true
+		}
+	}
+	return false
+}
+
+// snapshotOwnedDoltProcesses returns the dolt processes this test run owns:
+// config path under tempRoot, or environment attributed to this process via
+// GC_MANAGED_DOLT_TEST_PARENT_PID.
+func (g *doltLeakGuardedTestingM) snapshotOwnedDoltProcesses(enumerate func() ([]DoltProcInfo, error)) (map[int]DoltProcInfo, error) {
+	procs, err := enumerate()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int]DoltProcInfo, len(procs))
+	for _, p := range procs {
+		configPath := extractConfigPath(p.Argv)
+		underRoot := g.tempRoot != "" && pathutil.PathWithin(g.tempRoot, configPath)
+		if !underRoot && (g.attributedToParent == nil || !g.attributedToParent(p.PID)) {
+			continue
+		}
+		out[p.PID] = p
+	}
+	return out, nil
 }
 
 func (g *doltLeakGuardedTestingM) Run() int {
@@ -143,7 +197,7 @@ func (g *doltLeakGuardedTestingM) runWith(
 	stopSignalHandler := g.installSignalHandler()
 	defer stopSignalHandler()
 
-	initial, initialErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
+	initial, initialErr := g.snapshotOwnedDoltProcesses(enumerate)
 	if initialErr != nil {
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: initial scan failed: %v\n", initialErr) //nolint:errcheck
 	}
@@ -152,12 +206,12 @@ func (g *doltLeakGuardedTestingM) runWith(
 
 	guardFailed := initialErr != nil
 	if initialErr == nil {
-		final, finalErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
+		final, finalErr := g.snapshotOwnedDoltProcesses(enumerate)
 		if finalErr != nil {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
 			guardFailed = true
 		} else if leaked := diffDoltProcessSnapshots(initial, final); len(leaked) > 0 {
-			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), g.tempRoot) //nolint:errcheck
+			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) owned by this run (config under %s or env-attributed via %s)\n", len(leaked), g.tempRoot, managedDoltTestParentPIDEnv) //nolint:errcheck
 			writeDoltLeakReport(os.Stderr, leaked)
 			reapLeaks(leaked)
 			guardFailed = true
@@ -206,7 +260,7 @@ func (g *doltLeakGuardedTestingM) cleanupTemporaryPaths() {
 }
 
 func (g *doltLeakGuardedTestingM) reapDoltProcessesUnderRoot(label string) bool {
-	procs, err := snapshotDoltProcessesForConfigRoot(discoverDoltProcesses, g.tempRoot)
+	procs, err := g.snapshotOwnedDoltProcesses(discoverDoltProcesses)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s scan failed: %v\n", label, err) //nolint:errcheck
 		return true
@@ -302,22 +356,6 @@ func cmdGCTestConfigOwnerPID(configPath string, tempParent string) (int, bool) {
 		return pidFromPrefixedDirName(filepath.Base(root), prefix)
 	}
 	return 0, false
-}
-
-func snapshotDoltProcessesForConfigRoot(enumerate func() ([]DoltProcInfo, error), root string) (map[int]DoltProcInfo, error) {
-	procs, err := enumerate()
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[int]DoltProcInfo, len(procs))
-	for _, p := range procs {
-		configPath := extractConfigPath(p.Argv)
-		if root == "" || !pathutil.PathWithin(root, configPath) {
-			continue
-		}
-		out[p.PID] = p
-	}
-	return out, nil
 }
 
 func diffDoltProcessSnapshots(initial, final map[int]DoltProcInfo) []DoltProcInfo {

@@ -3406,6 +3406,20 @@ dolt.auto-start: false
 	}
 }
 
+func TestManagedBDRecoveryDisabledByGCDoltSkip(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	env := map[string]string{"GC_DOLT_HOST": ""}
+	cityPath := t.TempDir()
+	err := fmt.Errorf("dial tcp 127.0.0.1:13307: connect: connection refused")
+	if bdTransportRetryableError(cityPath, cityPath, env, err) {
+		t.Fatal("GC_DOLT=skip must disable bd transport retry classification")
+	}
+	if bdTransportRecoverableError(cityPath, cityPath, env, err) {
+		t.Fatal("GC_DOLT=skip must disable managed bd recovery classification")
+	}
+}
+
 func TestBdTransportRetryableErrorDoesNotTreatCommandTimeoutAsTransportFailure(t *testing.T) {
 	env := map[string]string{"GC_DOLT_HOST": ""}
 	t.Setenv("GC_BEADS", "bd")
@@ -3416,6 +3430,7 @@ func TestBdTransportRetryableErrorDoesNotTreatCommandTimeoutAsTransportFailure(t
 }
 
 func TestBdTransportTransientDisconnectDoesNotTriggerManagedRecovery(t *testing.T) {
+	enableManagedDoltForTest(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	origRunner := beadsExecCommandRunnerWithEnv
@@ -3466,6 +3481,7 @@ func TestBdTransportTransientDisconnectDoesNotTriggerManagedRecovery(t *testing.
 // transport failure so the managed-retry path can republish the correct port.
 // See gastownhall/gascity#1930.
 func TestBdTransportRetryableErrorTreatsAutoImportAsTransportFailure(t *testing.T) {
+	enableManagedDoltForTest(t)
 	env := map[string]string{"GC_DOLT_HOST": ""}
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := t.TempDir()
@@ -3482,6 +3498,7 @@ func TestBdTransportRetryableErrorTreatsAutoImportAsTransportFailure(t *testing.
 }
 
 func TestBdTransportRetryableErrorUsesScopeProviderForMixedRig(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	_ = writeReachableManagedDoltState(t, cityPath)
 	rigDir := filepath.Join(cityPath, "repo")
@@ -3517,6 +3534,7 @@ dolt.auto-start: false
 // on-disk store and triggers a JSONL auto-import, the managed-retry path must
 // republish the Dolt port and rerun the command.
 func TestBdCommandRunnerWithManagedRetryRecoversFromAutoImportFallback(t *testing.T) {
+	enableManagedDoltForTest(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	origRunner := beadsExecCommandRunnerWithEnv
@@ -3570,6 +3588,7 @@ func TestBdCommandRunnerWithManagedRetryRecoversFromAutoImportFallback(t *testin
 }
 
 func TestBdCommandRunnerWithManagedRetryRecoversAndRerunsWithFreshEnv(t *testing.T) {
+	enableManagedDoltForTest(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	origRunner := beadsExecCommandRunnerWithEnv
@@ -3632,6 +3651,7 @@ func TestBdCommandRunnerWithManagedRetryRecoversAndRerunsWithFreshEnv(t *testing
 }
 
 func TestBdCommandRunnerWithManagedRetryReturnsNilOutputOnRetryEnvError(t *testing.T) {
+	enableManagedDoltForTest(t)
 	t.Setenv("GC_BEADS", "bd")
 
 	origRunner := beadsExecCommandRunnerWithEnv

@@ -298,6 +298,11 @@ func TestCityStatusLongNamesKeepStatusSeparator(t *testing.T) {
 	// Each rendered line in the Agents, Named sessions, and Rigs blocks
 	// must keep at least one space (and ideally two) between the name
 	// and the value that follows.
+	// The city path must be a private tempdir: a fixed path like /tmp/city
+	// accretes real state across runs, and doCityStatus's session-snapshot
+	// load opens the persisted store it finds there — which boots a real
+	// managed dolt server via the bd transport-recovery path (gc-6ut).
+	disableManagedDoltRecoveryForTest(t)
 	longRig := "petereinc-gascity-pack"
 	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
@@ -316,7 +321,7 @@ func TestCityStatusLongNamesKeepStatusSeparator(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, "/tmp/city", &stdout, &stderr)
+	code := doCityStatus(sp, dops, cfg, t.TempDir(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}

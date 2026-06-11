@@ -197,6 +197,14 @@ func TestMain(m *testing.M) {
 	}
 
 	clearProcessLiveEnvForTests()
+	// Package-wide managed-dolt default-off (gc-6ut): a test that reaches a
+	// store-open or bd transport-recovery path must not boot a real dolt
+	// server unless it opts in with t.Setenv("GC_DOLT", ""). Mirrors the
+	// testscript default in configureTestscriptEnvDefaults; clearGCEnv
+	// restores it after scrubbing.
+	if err := os.Setenv("GC_DOLT", "skip"); err != nil {
+		panic(err)
+	}
 	if err := os.Setenv(managedDoltTestModeEnv, "1"); err != nil {
 		panic(err)
 	}

@@ -878,6 +878,7 @@ printf 'status=%%s\n' "$status"
 }
 
 func TestEnsureBeadsProviderPublishesManagedDoltRuntimeStateFromProviderState(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "frontend")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -2954,6 +2955,7 @@ func TestInitBeadsForDir_execPassesCanonicalDoltDatabase(t *testing.T) {
 // script itself; that behavior is covered by internal/runtime/k8s tests.
 // Regression for #399.
 func TestInitBeadsForDirExecSetsBEADSDIR(t *testing.T) {
+	enableManagedDoltForTest(t)
 	for _, tc := range []struct {
 		name       string
 		scriptBase string
@@ -3009,6 +3011,7 @@ func TestInitBeadsForDirExecSetsBEADSDIR(t *testing.T) {
 }
 
 func TestInitBeadsForDirCanonicalRigIgnoresUnresolvableCityPostgres(t *testing.T) {
+	enableManagedDoltForTest(t)
 	clearAmbientPostgresEnv(t)
 
 	cityDir := t.TempDir()
@@ -3088,6 +3091,7 @@ dolt.port: 4407
 }
 
 func TestInitBeadsForDirCanonicalRigClearsResolvableCityPostgres(t *testing.T) {
+	enableManagedDoltForTest(t)
 	clearAmbientPostgresEnv(t)
 
 	cityDir := t.TempDir()
@@ -3173,6 +3177,7 @@ dolt.port: 4407
 }
 
 func TestInitBeadsForDirLegacyRigIgnoresUnresolvableCityPostgres(t *testing.T) {
+	enableManagedDoltForTest(t)
 	clearAmbientPostgresEnv(t)
 
 	cityDir := t.TempDir()
@@ -3248,6 +3253,7 @@ dolt.auto-start: false
 }
 
 func TestInitBeadsForDirLegacyRigClearsResolvableCityPostgres(t *testing.T) {
+	enableManagedDoltForTest(t)
 	clearAmbientPostgresEnv(t)
 
 	cityDir := t.TempDir()
@@ -3454,6 +3460,7 @@ exit 0
 }
 
 func TestInitBeadsForDirExecGcBeadsBdPreservesCityRuntimeEnv(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityDir := t.TempDir()
 	writeMinimalCityToml(t, cityDir)
 	logFile := filepath.Join(t.TempDir(), "env.log")
@@ -3688,6 +3695,7 @@ func TestInitBeadsForDir_execOmitsCanonicalDoltDatabaseWhenUnknown(t *testing.T)
 
 // TestInitBeadsForDir_bd_skip verifies bd provider is no-op when GC_DOLT=skip.
 func TestInitBeadsForDirExecGcBeadsBdPassesComputedCanonicalDoltDatabase(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityDir := t.TempDir()
 	writeMinimalCityToml(t, cityDir)
 	logFile := filepath.Join(t.TempDir(), "args.log")
@@ -3794,6 +3802,7 @@ esac
 }
 
 func TestInitBeadsForDirBdMaterializedScriptIgnoresAmbientCityRuntimeEnv(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityDir := t.TempDir()
 	writeMinimalCityToml(t, cityDir)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -4355,6 +4364,7 @@ exit 1
 }
 
 func TestGcBeadsBdInitRetriesRootStoreVerification(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
@@ -4452,6 +4462,7 @@ esac
 }
 
 func TestInitAndHookDirExecGcBeadsBdProjectsCanonicalExternalCityEnv(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	cityToml := `[workspace]
 name = "demo"
@@ -4502,6 +4513,7 @@ dolt.user: city-user
 }
 
 func TestInitAndHookDirExecGcBeadsBdProjectsCanonicalExplicitRigEnv(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "frontend")
 	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
@@ -4556,6 +4568,7 @@ dolt.user: rig-user
 }
 
 func TestInitAndHookDirExecGcBeadsBdProjectsInheritedExternalRigEnv(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "frontend")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
@@ -4628,6 +4641,7 @@ dolt.user: city-user
 }
 
 func TestHealthBeadsProviderExecGcBeadsBdProjectsCanonicalExternalCityEnv(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
@@ -4823,6 +4837,7 @@ func TestHealthBeadsProviderPublishesManagedRuntimeStateWhenHealthyButUnpublishe
 }
 
 func TestEnsureBeadsProviderExecGcBeadsBdProjectsCanonicalPackStateDir(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
 		t.Fatal(err)
@@ -5302,6 +5317,7 @@ esac
 }
 
 func TestInitAndHookDirAdoptsAlreadyInitializedCanonicalExecBdStore(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "tincan")
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -5576,6 +5592,7 @@ exec %q "$@"
 }
 
 func TestGcBeadsBdInitPinsManagedDoltEnvForBdSubcommands(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -10397,6 +10414,7 @@ exit 0
 }
 
 func TestHealthBeadsProviderDoesNotRecoverExternalLoopbackTarget(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	callLog := filepath.Join(cityPath, "op-calls.log")
 	script := gcBeadsBdScriptPath(cityPath)
@@ -10591,6 +10609,7 @@ dolt.auto-start: false
 // ── startBeadsLifecycle skips provider for external ───────────────────
 
 func TestStartBeadsLifecycleSkipsProviderForExternalHost(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	// Install a test script that tracks which operations are called.
 	// "start" should NOT be called (skipped by external host guard).
@@ -11557,6 +11576,7 @@ func TestIsBreakerOpenError(t *testing.T) {
 }
 
 func TestHealthBeadsProviderSkipsRecoverWhenBreakerOpen(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	opsFile := writeBreakerAwarePreflightFakes(t, cityPath,
@@ -11587,6 +11607,7 @@ func TestHealthBeadsProviderSkipsRecoverWhenBreakerOpen(t *testing.T) {
 }
 
 func TestHealthBeadsProviderBacksOffSecondRecoverWithinCooldown(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
@@ -11627,6 +11648,7 @@ func TestHealthBeadsProviderBacksOffSecondRecoverWithinCooldown(t *testing.T) {
 }
 
 func TestHealthBeadsProviderAllowsRecoverAfterCooldown(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")

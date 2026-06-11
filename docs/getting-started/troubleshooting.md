@@ -298,17 +298,21 @@ interactive shell, but fail to authenticate (or silently fall back to a
 different provider) when the city is started by the supervisor at login or
 after a reboot.
 
-Cause: the supervisor service file (launchd plist / systemd unit) captures
-provider credentials by snapshotting the environment of the shell that ran
-`gc start` (or `gc supervisor install`). A credential that is only present
-in an interactive shell — for example sourced from an rc file that the login
-service manager never reads — is not in that snapshot, so it never reaches
-the supervised process.
+Cause: provider credentials reach the supervisor through a machine-local
+secrets file, `${GC_HOME}/secrets.env` (defaults to `~/.gc/secrets.env`),
+which `gc supervisor run` loads at startup. The generated service file
+(launchd plist / systemd unit) deliberately carries no credential values —
+`systemctl --user show` and plist reads must not expose them. A credential
+that is only present in an interactive shell — for example sourced from an
+rc file that the login service manager never reads — reaches the file only
+when an install scan sees it.
 
-Fix: put the durable credentials in a machine-local secrets file at
-`${GC_HOME}/secrets.env` (defaults to `~/.gc/secrets.env`). On every service
-file regeneration, `gc` merges this file into the supervisor environment, so
-the value survives a reboot regardless of which shell ran `gc start`.
+`gc supervisor install` (which every `gc start` runs) scans the calling
+shell for provider credentials (recognized by their standard prefixes such
+as `ANTHROPIC_`, `OPENAI_`, `GEMINI_`) plus `GC_DOLT_PASSWORD`, and seeds
+them into `secrets.env` (created `0600`). So the usual fix is to run
+`gc start` once from a shell that has the credential exported. You can also
+maintain the file by hand:
 
 ```bash
 # ~/.gc/secrets.env  (chmod 600)
@@ -317,15 +321,16 @@ OPENAI_API_KEY=sk-...
 ```
 
 The file uses dotenv syntax: `KEY=VALUE` per line, `#` comments, blank lines,
-an optional `export ` prefix, and optional surrounding quotes. Only keys that
-are already eligible for the supervisor environment are merged — provider
-credentials (recognized by their standard prefixes such as `ANTHROPIC_`,
-`OPENAI_`, `GEMINI_`) plus any keys you opt in via `GC_SUPERVISOR_ENV`; any
-other key in the file is ignored. A value exported in the calling shell still
-takes precedence over the file, and `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1`
-suppresses provider credentials from both sources.
+an optional `export ` prefix, and optional surrounding quotes. Seeding
+patches the file in place — comments and hand-added entries survive, and a
+value exported in the calling shell replaces an existing entry for the same
+key. At startup the file fills only keys the service environment left unset,
+so inlined non-secret env keeps precedence. `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1`
+at install time suppresses the seeding scan (the service file is
+credential-free either way); keys you opt in via `GC_SUPERVISOR_ENV` seed
+even with the flag set.
 
-Apply the change by regenerating the service file:
+Apply a hand-edit by restarting the supervisor so it reloads the file:
 
 ```bash
 gc service restart     # restarts the launchd/systemd service

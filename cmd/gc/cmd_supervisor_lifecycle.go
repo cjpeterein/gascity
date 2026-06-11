@@ -440,6 +440,7 @@ StandardOutput=journal).`,
 var runSupervisorFunc = runSupervisor
 
 func doSupervisorRun(stdout, stderr io.Writer) int {
+	loadSupervisorSecretsEnvIntoProcessEnv()
 	defaultSupervisorBeadsActor()
 	return runSupervisorFunc(stdout, stderr)
 }
@@ -1076,9 +1077,11 @@ func sanitizeServiceName(name string) string {
 
 var supervisorServiceEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// Keep persistent service-file env narrow. Provider credentials and user
-// context need to survive launchd/systemd startup; arbitrary shell state can
-// be opted in with GC_SUPERVISOR_ENV.
+// Keep persistent service-file env narrow. User context needs to survive
+// launchd/systemd startup; arbitrary shell state can be opted in with
+// GC_SUPERVISOR_ENV. Secret-class members (GC_DOLT_PASSWORD) stay on this
+// allowlist for scan eligibility but are routed to ${GC_HOME}/secrets.env
+// instead of the service file (see isSupervisorSecretEnv).
 var supervisorServiceEnvKeys = map[string]bool{
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true,
 	"CLAUDE_CODE_EFFORT_LEVEL":                 true,
@@ -1109,62 +1112,48 @@ var supervisorServiceFixedEnvKeys = map[string]bool{
 	"XDG_RUNTIME_DIR":                     true,
 }
 
+// supervisorServiceExtraEnv returns the env vars to inline as Environment=
+// lines (systemd) or EnvironmentVariables entries (launchd) in the generated
+// service file. Secret-class keys never appear here: they are seeded into
+// ${GC_HOME}/secrets.env at install time and loaded by `gc supervisor run`
+// at startup, so the service file stays free of credential values.
 func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	env := make(map[string]string)
 	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
-	explicitEnvKeySet := make(map[string]bool, len(explicitEnvKeys))
-	for _, key := range explicitEnvKeys {
-		explicitEnvKeySet[key] = true
-	}
 	for _, entry := range os.Environ() {
 		key, val, ok := strings.Cut(entry, "=")
-		if !ok || val == "" || !shouldPersistSupervisorEnv(key) {
+		if !ok || val == "" || !shouldInlineSupervisorServiceEnv(key) {
 			continue
 		}
 		env[key] = val
 	}
 	for _, key := range explicitEnvKeys {
+		if isSupervisorSecretEnv(key) {
+			continue
+		}
 		if val := os.Getenv(key); val != "" {
 			env[key] = val
 		}
-	}
-	// Merge a persistent machine-local secrets file (${GC_HOME}/secrets.env)
-	// as a fallback tier. `gc start` snapshots the calling shell's env into
-	// the service file, so a credential that lives only in this file and was
-	// never exported into the invoking shell would otherwise be dropped —
-	// yielding a blank value and a silent provider auth failure. A non-empty
-	// value already in env (from the shell scan or a GC_SUPERVISOR_ENV opt-in)
-	// still takes precedence; the file only fills keys those tiers left unset.
-	// As elsewhere in this function, an empty value counts as unset. A file
-	// entry must clear the same gate the other tiers use — the persist
-	// allowlist or an explicit opt-in — so a stray key cannot bloat the
-	// service env.
-	for key, val := range supervisorSecretsEnvFileEntries() {
-		if val == "" {
-			continue
-		}
-		if _, ok := env[key]; ok {
-			continue
-		}
-		if !shouldPersistSupervisorEnv(key) && !explicitEnvKeySet[key] {
-			continue
-		}
-		env[key] = val
 	}
 	// Fall back to `launchctl getenv` for known-allowlisted keys and
 	// for GC_SUPERVISOR_ENV opt-ins. Without this, launchctl-set
 	// documented Dolt credential/logging settings are silently dropped:
 	// the plist's EnvironmentVariables block scopes the spawned
 	// supervisor's env, and `os.Environ()` only sees what's exported in
-	// the calling shell.
+	// the calling shell. Secret-class keys are probed by the secret scan
+	// (supervisorInstallSecretEnv) instead, keeping the two probe sets
+	// disjoint.
 	launchctlKeys := make([]string, 0, len(supervisorServiceEnvKeys)+len(explicitEnvKeys))
 	launchctlSeen := make(map[string]bool, cap(launchctlKeys))
 	for key := range supervisorServiceEnvKeys {
+		if isSupervisorSecretEnv(key) {
+			continue
+		}
 		launchctlSeen[key] = true
 		launchctlKeys = append(launchctlKeys, key)
 	}
 	for _, key := range explicitEnvKeys {
-		if launchctlSeen[key] {
+		if launchctlSeen[key] || isSupervisorSecretEnv(key) {
 			continue
 		}
 		launchctlSeen[key] = true
@@ -1192,21 +1181,89 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	return out
 }
 
-func shouldPersistSupervisorEnv(key string) bool {
+// shouldInlineSupervisorServiceEnv reports whether a shell-scanned key may be
+// inlined into the generated service file: well-formed, not fixed by the
+// template, allowlisted, and not secret-class.
+func shouldInlineSupervisorServiceEnv(key string) bool {
 	if !supervisorServiceEnvNameRE.MatchString(key) || supervisorServiceFixedEnvKeys[key] {
 		return false
 	}
-	if supervisorServiceEnvKeys[key] {
-		return true
+	if isSupervisorSecretEnv(key) {
+		return false
 	}
-	if isProviderCredentialEnv(key) {
-		return os.Getenv(supervisorOmitProviderCredsEnv) != "1"
-	}
-	return false
+	return supervisorServiceEnvKeys[key]
 }
 
 func isProviderCredentialEnv(key string) bool {
 	return processenv.IsProviderCredentialEnv(key)
+}
+
+// isSupervisorSecretEnv reports whether key is secret-class for the
+// supervisor service file: provider credentials plus GC_DOLT_PASSWORD.
+// Secret-class values are delivered via ${GC_HOME}/secrets.env, never as
+// service-file env that `systemctl --user show` or a plist read would expose.
+func isSupervisorSecretEnv(key string) bool {
+	return key == "GC_DOLT_PASSWORD" || isProviderCredentialEnv(key)
+}
+
+// supervisorInstallSecretEnv collects secret-class env for seeding
+// ${GC_HOME}/secrets.env at install time. Tier order matches the historical
+// service-file scan: shell env first, then `launchctl getenv` fills keys the
+// shell left unset (secret-class allowlist members and GC_SUPERVISOR_ENV
+// opt-ins). GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1 drops provider credentials
+// from the scan; an explicit GC_SUPERVISOR_ENV opt-in overrides the flag,
+// and GC_DOLT_PASSWORD is not a provider credential so the flag never
+// affects it.
+func supervisorInstallSecretEnv() map[string]string {
+	omitProviderCreds := os.Getenv(supervisorOmitProviderCredsEnv) == "1"
+	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
+	explicitEnvKeySet := make(map[string]bool, len(explicitEnvKeys))
+	for _, key := range explicitEnvKeys {
+		explicitEnvKeySet[key] = true
+	}
+	include := func(key string) bool {
+		if !supervisorServiceEnvNameRE.MatchString(key) || supervisorServiceFixedEnvKeys[key] || !isSupervisorSecretEnv(key) {
+			return false
+		}
+		if omitProviderCreds && isProviderCredentialEnv(key) && !explicitEnvKeySet[key] {
+			return false
+		}
+		return true
+	}
+	secrets := make(map[string]string)
+	for _, entry := range os.Environ() {
+		key, val, ok := strings.Cut(entry, "=")
+		if !ok || val == "" || !include(key) {
+			continue
+		}
+		secrets[key] = val
+	}
+	launchctlKeys := make([]string, 0, len(explicitEnvKeys)+1)
+	launchctlSeen := make(map[string]bool, cap(launchctlKeys))
+	for key := range supervisorServiceEnvKeys {
+		if !isSupervisorSecretEnv(key) {
+			continue
+		}
+		launchctlSeen[key] = true
+		launchctlKeys = append(launchctlKeys, key)
+	}
+	for _, key := range explicitEnvKeys {
+		if launchctlSeen[key] || !isSupervisorSecretEnv(key) {
+			continue
+		}
+		launchctlSeen[key] = true
+		launchctlKeys = append(launchctlKeys, key)
+	}
+	sort.Strings(launchctlKeys)
+	for _, key := range launchctlKeys {
+		if _, ok := secrets[key]; ok || !include(key) {
+			continue
+		}
+		if val := supervisorLaunchctlGetenv(key); val != "" {
+			secrets[key] = val
+		}
+	}
+	return secrets
 }
 
 // supervisorSecretsEnvFileName is the dotenv-style file under GC_HOME that
@@ -1223,9 +1280,9 @@ func supervisorSecretsEnvFilePath() string {
 // supervisorSecretsEnvFileEntries reads ${GC_HOME}/secrets.env and returns its
 // parsed key/value pairs. A missing file is the normal case and yields nil. A
 // present-but-unreadable or malformed file is logged to stderr and ignored so
-// a bad secrets file never blocks supervisor install/start; the caller still
-// gates whatever is returned on the persist allowlist or an explicit
-// GC_SUPERVISOR_ENV opt-in.
+// a bad secrets file never blocks supervisor startup; the caller still gates
+// whatever is returned (loadSupervisorSecretsEnvIntoProcessEnv skips fixed
+// service keys and malformed names).
 func supervisorSecretsEnvFileEntries() map[string]string {
 	path := supervisorSecretsEnvFilePath()
 	data, err := os.ReadFile(path)
@@ -1241,6 +1298,133 @@ func supervisorSecretsEnvFileEntries() map[string]string {
 		return nil
 	}
 	return entries
+}
+
+// loadSupervisorSecretsEnvIntoProcessEnv loads ${GC_HOME}/secrets.env into
+// the supervisor's process env at startup, filling only keys that are unset
+// or empty so service-file Environment= lines and operator overrides keep
+// precedence. This is the delivery half of install-time seeding: the service
+// file carries no secret values, launchd has no EnvironmentFile equivalent,
+// and spawned agent sessions inherit provider credentials from this process
+// env (processenv.ProviderProcessPassthroughEnv). Fixed service keys
+// (GC_HOME, PATH, ...) are never taken from the file — GC_HOME in particular
+// resolved this file's own path, so honoring a different value from the file
+// would leave the supervisor split across two homes.
+func loadSupervisorSecretsEnvIntoProcessEnv() {
+	for key, val := range supervisorSecretsEnvFileEntries() {
+		if val == "" || !supervisorServiceEnvNameRE.MatchString(key) || supervisorServiceFixedEnvKeys[key] {
+			continue
+		}
+		if os.Getenv(key) != "" {
+			continue
+		}
+		if err := os.Setenv(key, val); err != nil {
+			fmt.Fprintf(os.Stderr, "gc: applying %s from supervisor secrets file: %v\n", key, err)
+		}
+	}
+}
+
+// mergeSupervisorSecretsEnvFile seeds install-scan secrets into
+// ${GC_HOME}/secrets.env. The write is a line-level patch, not a rewrite:
+// operator comments and unrelated entries survive, every assignment line of
+// an updated key is replaced (the parser is last-assignment-wins), and new
+// keys are appended sorted. The result lands atomically (temp file + rename)
+// with 0600 permissions, and an existing file is clamped to 0600 even when
+// its content is already current. Error messages and warnings name paths and
+// keys only, never values. A found value containing a line break is skipped
+// with a warning: written raw it would corrupt the line-oriented format and
+// poison every later load. A malformed existing file is an error — rewriting
+// a file we cannot parse would destroy operator content.
+func mergeSupervisorSecretsEnvFile(found map[string]string) error {
+	path := supervisorSecretsEnvFilePath()
+	raw, err := os.ReadFile(path)
+	exists := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading supervisor secrets file %s: %w", path, err)
+	}
+	existing := map[string]string{}
+	if exists {
+		existing, err = processenv.ParseEnvFile(string(raw))
+		if err != nil {
+			return fmt.Errorf("parsing supervisor secrets file %s (fix or remove it, then rerun): %w", path, err)
+		}
+	}
+	toWrite := make(map[string]string, len(found))
+	for key, val := range found {
+		if strings.ContainsAny(val, "\r\n") {
+			fmt.Fprintf(os.Stderr, "gc: not seeding %s into %s: value contains a line break\n", key, path)
+			continue
+		}
+		if existingVal, ok := existing[key]; !ok || existingVal != val {
+			toWrite[key] = val
+		}
+	}
+	if len(toWrite) == 0 {
+		if exists {
+			return os.Chmod(path, 0o600)
+		}
+		return nil
+	}
+
+	var lines []string
+	if exists {
+		lines = strings.Split(string(raw), "\n")
+		// Drop the final empty element from a trailing newline; the join
+		// below re-adds it.
+		if n := len(lines); n > 0 && lines[n-1] == "" {
+			lines = lines[:n-1]
+		}
+	}
+	replaced := make(map[string]bool, len(toWrite))
+	for i, line := range lines {
+		key, ok := processenv.EnvFileAssignmentKey(line)
+		if !ok {
+			continue
+		}
+		val, ok := toWrite[key]
+		if !ok {
+			continue
+		}
+		lines[i] = key + "=" + processenv.QuoteEnvValue(val)
+		replaced[key] = true
+	}
+	appendKeys := make([]string, 0, len(toWrite))
+	for key := range toWrite {
+		if !replaced[key] {
+			appendKeys = append(appendKeys, key)
+		}
+	}
+	sort.Strings(appendKeys)
+	for _, key := range appendKeys {
+		lines = append(lines, key+"="+processenv.QuoteEnvValue(toWrite[key]))
+	}
+	content := strings.Join(lines, "\n") + "\n"
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating supervisor secrets dir %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, supervisorSecretsEnvFileName+".tmp*")
+	if err != nil {
+		return fmt.Errorf("creating supervisor secrets temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // no-op after successful rename
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close() //nolint:errcheck // best-effort cleanup on error path
+		return fmt.Errorf("setting supervisor secrets temp file mode: %w", err)
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close() //nolint:errcheck // best-effort cleanup on error path
+		return fmt.Errorf("writing supervisor secrets temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing supervisor secrets temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("installing supervisor secrets file %s: %w", path, err)
+	}
+	return nil
 }
 
 func supervisorServiceExplicitEnvKeys(raw string) []string {
@@ -1751,6 +1935,16 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 			return 1
 		}
 	}
+	// Seed secret-class env (provider credentials, GC_DOLT_PASSWORD) into
+	// ${GC_HOME}/secrets.env instead of the plist — before the
+	// content-unchanged early return, so a credential newly exported in
+	// the shell still reaches the file even when the plist needs no
+	// rewrite. Failing the install on seed failure is deliberate: the
+	// plist no longer carries these values.
+	if err := mergeSupervisorSecretsEnvFile(supervisorInstallSecretEnv()); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if contentUnchanged && supervisorAliveHook() != 0 {
 		fmt.Fprintf(stdout, "Installed launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
 		return 0
@@ -1907,6 +2101,15 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 				"log in via a PAM session that starts user-systemd, or run the supervisor "+
 				"detached (e.g. 'gc supervisor start' without service install).\n",
 			currentUsernameForSystemdHint())
+		return 1
+	}
+
+	// Seed secret-class env (provider credentials, GC_DOLT_PASSWORD) into
+	// ${GC_HOME}/secrets.env instead of the unit. Failing the install here
+	// is deliberate: the unit no longer carries these values, so dropping
+	// the seed would silently strand credentials until the next install.
+	if err := mergeSupervisorSecretsEnvFile(supervisorInstallSecretEnv()); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

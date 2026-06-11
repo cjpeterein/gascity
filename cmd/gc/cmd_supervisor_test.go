@@ -574,7 +574,7 @@ func TestSupervisorInstallSecretEnvRespectsOmitProviderCreds(t *testing.T) {
 	t.Setenv("GC_SUPERVISOR_ENV", "OPENAI_API_KEY")
 	t.Setenv(supervisorOmitProviderCredsEnv, "1")
 
-	got := supervisorInstallSecretEnv()
+	got := supervisorInstallSecretEnv(nil)
 	if _, ok := got["ANTHROPIC_API_KEY"]; ok {
 		t.Fatalf("secret env should not include provider key ANTHROPIC_API_KEY when %s=1: %#v",
 			supervisorOmitProviderCredsEnv, got)
@@ -775,7 +775,7 @@ func TestSupervisorInstallSecretEnvCollectsRepresentativeProviderPrefixes(t *tes
 		t.Fatalf("buildSupervisorServiceData: %v", err)
 	}
 	inline := supervisorServiceEnvMap(data.ExtraEnv)
-	secrets := supervisorInstallSecretEnv()
+	secrets := supervisorInstallSecretEnv(nil)
 	for k, want := range probes {
 		if _, ok := inline[k]; ok {
 			t.Errorf("ExtraEnv should not include provider key %s", k)
@@ -832,7 +832,7 @@ func TestSupervisorInstallSecretEnvCollectsCuratedProviderCredentialEnvKeys(t *t
 		t.Fatalf("buildSupervisorServiceData: %v", err)
 	}
 	inline := supervisorServiceEnvMap(data.ExtraEnv)
-	secrets := supervisorInstallSecretEnv()
+	secrets := supervisorInstallSecretEnv(nil)
 	for k, want := range probes {
 		if _, ok := inline[k]; ok {
 			t.Errorf("ExtraEnv should not include provider key %s", k)
@@ -890,7 +890,7 @@ func TestBuildSupervisorServiceDataReadsAllowlistedDoltCredentialKeysFromLaunchc
 	if _, ok := got["GC_DOLT_PASSWORD"]; ok {
 		t.Fatalf("ExtraEnv should not include GC_DOLT_PASSWORD (routes to secrets.env): %#v", got)
 	}
-	secrets := supervisorInstallSecretEnv()
+	secrets := supervisorInstallSecretEnv(nil)
 	if secrets["GC_DOLT_PASSWORD"] != "redacted-test-value" {
 		t.Fatalf("secret env[GC_DOLT_PASSWORD] = %q, want launchctl value %q",
 			secrets["GC_DOLT_PASSWORD"], "redacted-test-value")
@@ -1052,7 +1052,7 @@ func TestSupervisorInstallProbesLaunchctlOncePerKeyAcrossScans(t *testing.T) {
 	if _, err := buildSupervisorServiceData(); err != nil {
 		t.Fatalf("buildSupervisorServiceData: %v", err)
 	}
-	supervisorInstallSecretEnv()
+	supervisorInstallSecretEnv(nil)
 	for _, key := range []string{"GC_DOLT_LOGLEVEL", "GC_DOLT_PASSWORD"} {
 		if calls[key] != 1 {
 			t.Fatalf("launchctl getenv calls for %s = %d across both scans, want 1 (all calls: %#v)", key, calls[key], calls)
@@ -1074,7 +1074,7 @@ func TestSupervisorInstallSecretEnvCollectsShellSecrets(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(homeDir, ".claude"))
 	t.Setenv("UNRELATED_SECRET", "do-not-persist")
 
-	got := supervisorInstallSecretEnv()
+	got := supervisorInstallSecretEnv(nil)
 	for key, want := range map[string]string{
 		"OPENAI_API_KEY":   "sk-openai-123",
 		"GC_DOLT_PASSWORD": "dolt-secret-123",
@@ -1087,6 +1087,104 @@ func TestSupervisorInstallSecretEnvCollectsShellSecrets(t *testing.T) {
 		if _, ok := got[key]; ok {
 			t.Fatalf("secret env should not include %s: %#v", key, got)
 		}
+	}
+}
+
+// TestSupervisorInstallSecretEnvHarvestIsLowestTier asserts the migration
+// fallback ordering: a secret-class value harvested from a pre-migration
+// service file fills the seed only when neither the install scan nor the
+// existing secrets file already has the key, and the harvest respects the
+// same include gates as the scan (non-secret keys ignored, provider creds
+// dropped under GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1).
+func TestSupervisorInstallSecretEnvHarvestIsLowestTier(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("OPENAI_API_KEY", "sk-from-shell")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "")
+
+	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_API_KEY=sk-rotated-in-file\n")
+
+	got := supervisorInstallSecretEnv(map[string]string{
+		"OPENAI_API_KEY":    "sk-stale-in-unit",
+		"ANTHROPIC_API_KEY": "sk-stale-in-unit",
+		"GEMINI_API_KEY":    "gemini-only-in-unit",
+		"CLAUDE_CONFIG_DIR": "/not-a-secret",
+	})
+	if got["OPENAI_API_KEY"] != "sk-from-shell" {
+		t.Fatalf("secret env[OPENAI_API_KEY] = %q, want shell value to beat harvested unit value", got["OPENAI_API_KEY"])
+	}
+	if _, ok := got["ANTHROPIC_API_KEY"]; ok {
+		t.Fatalf("secret env should not harvest a key the secrets file already has (would undo rotation): %#v", got)
+	}
+	if got["GEMINI_API_KEY"] != "gemini-only-in-unit" {
+		t.Fatalf("secret env[GEMINI_API_KEY] = %q, want harvested unit value", got["GEMINI_API_KEY"])
+	}
+	if _, ok := got["CLAUDE_CONFIG_DIR"]; ok {
+		t.Fatalf("secret env should not include non-secret harvested key: %#v", got)
+	}
+
+	t.Setenv(supervisorOmitProviderCredsEnv, "1")
+	got = supervisorInstallSecretEnv(map[string]string{"GEMINI_API_KEY": "gemini-only-in-unit"})
+	if _, ok := got["GEMINI_API_KEY"]; ok {
+		t.Fatalf("secret env should not harvest provider creds when %s=1: %#v", supervisorOmitProviderCredsEnv, got)
+	}
+}
+
+func TestHarvestSupervisorSecretEnvFromSystemdUnit(t *testing.T) {
+	unit := `[Service]
+ExecStart=/usr/local/bin/gc supervisor run
+Environment=GC_HOME="/home/user/.gc"
+Environment=PATH="/usr/local/bin:/usr/bin:/bin"
+Environment=OPENAI_API_KEY="sk-openai-\"quoted\""
+Environment=GC_DOLT_PASSWORD=dolt-bare-value
+Environment=CLAUDE_CONFIG_DIR="/home/user/.claude"
+`
+	got := harvestSupervisorSecretEnvFromSystemdUnit(unit)
+	want := map[string]string{
+		"OPENAI_API_KEY":   `sk-openai-"quoted"`,
+		"GC_DOLT_PASSWORD": "dolt-bare-value",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("harvest = %#v, want exactly %#v", got, want)
+	}
+	for key, wantVal := range want {
+		if got[key] != wantVal {
+			t.Fatalf("harvest[%s] = %q, want %q", key, got[key], wantVal)
+		}
+	}
+}
+
+func TestHarvestSupervisorSecretEnvFromLaunchdPlist(t *testing.T) {
+	plist := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gascity.supervisor</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>GC_HOME</key>
+        <string>/home/user/.gc</string>
+        <key>ANTHROPIC_API_KEY</key>
+        <string>sk-ant-&amp;escaped</string>
+        <key>CLAUDE_CONFIG_DIR</key>
+        <string>/home/user/.claude</string>
+    </dict>
+</dict>
+</plist>
+`
+	got := harvestSupervisorSecretEnvFromLaunchdPlist([]byte(plist))
+	want := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-&escaped"}
+	if len(got) != len(want) {
+		t.Fatalf("harvest = %#v, want exactly %#v", got, want)
+	}
+	if got["ANTHROPIC_API_KEY"] != want["ANTHROPIC_API_KEY"] {
+		t.Fatalf("harvest[ANTHROPIC_API_KEY] = %q, want %q", got["ANTHROPIC_API_KEY"], want["ANTHROPIC_API_KEY"])
+	}
+	if harvested := harvestSupervisorSecretEnvFromLaunchdPlist(nil); len(harvested) != 0 {
+		t.Fatalf("harvest of empty plist = %#v, want empty", harvested)
 	}
 }
 
@@ -1720,6 +1818,64 @@ func TestInstallSupervisorSystemdSeedsSecretsEnvAndKeepsUnitClean(t *testing.T) 
 	}
 	if got := readSupervisorSecretsEnvFile(t); got["OPENAI_API_KEY"] != "sk-openai-secret-123" {
 		t.Fatalf("secrets file[OPENAI_API_KEY] = %q, want %q", got["OPENAI_API_KEY"], "sk-openai-secret-123")
+	}
+}
+
+// TestInstallSupervisorSystemdMigratesInlinedCredsFromExistingUnit covers the
+// upgrade path: a pre-migration unit carries an inlined credential the
+// calling shell no longer exports. The rewrite must move the value into
+// ${GC_HOME}/secrets.env rather than silently dropping it, and the refreshed
+// unit must not contain it.
+func TestInstallSupervisorSystemdMigratesInlinedCredsFromExistingUnit(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	unitPath := supervisorSystemdServicePath()
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldUnit := "[Service]\nEnvironment=ANTHROPIC_API_KEY=\"sk-ant-legacy-inline\"\n"
+	if err := os.WriteFile(unitPath, []byte(oldUnit), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorSystemctlRun
+	oldActive := supervisorSystemctlActive
+	oldAvailable := supervisorSystemctlUserAvailable
+	supervisorSystemctlRun = func(...string) error { return nil }
+	supervisorSystemctlActive = func(string) bool { return false }
+	supervisorSystemctlUserAvailable = func() bool { return true }
+	t.Cleanup(func() {
+		supervisorSystemctlRun = oldRun
+		supervisorSystemctlActive = oldActive
+		supervisorSystemctlUserAvailable = oldAvailable
+	})
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorSystemd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorSystemd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+
+	unit, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("reading refreshed unit: %v", err)
+	}
+	if strings.Contains(string(unit), "sk-ant-legacy-inline") {
+		t.Fatalf("refreshed unit still contains the inlined credential:\n%s", string(unit))
+	}
+	if got := readSupervisorSecretsEnvFile(t); got["ANTHROPIC_API_KEY"] != "sk-ant-legacy-inline" {
+		t.Fatalf("secrets file[ANTHROPIC_API_KEY] = %q, want migrated value %q",
+			got["ANTHROPIC_API_KEY"], "sk-ant-legacy-inline")
 	}
 }
 

@@ -356,6 +356,113 @@ func TestReconcileSessionBeads_AssignedNamedSessionByBeadIDOverridesNonInteracti
 	}
 }
 
+func TestReconcileSessionBeads_AssignedWorkWakesAsleepOnDemandNamedInteractiveSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:           "worker",
+			StartCommand:   "true",
+			SleepAfterIdle: "300s",
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "test-cmd",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "on_demand",
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "asleep",
+		"sleep_reason":               "idle",
+		"slept_at":                   env.clk.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	})
+	policy := resolveSessionSleepPolicy(session, env.cfg, env.sp)
+	if policy.Class == config.SessionSleepNonInteractive {
+		t.Fatalf("setup: policy class = %q, want an interactive class", policy.Class)
+	}
+	if !policy.enabled() {
+		t.Fatal("setup: sleep policy must be enabled for suppression to engage")
+	}
+	env.setSessionMetadata(&session, map[string]string{
+		"sleep_policy_fingerprint": policy.Fingerprint,
+	})
+
+	work, err := env.store.Create(beads.Bead{
+		Title:    "merge-queue handoff",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "worker",
+	})
+	if err != nil {
+		t.Fatalf("create assigned work: %v", err)
+	}
+
+	cfgNames := configuredSessionNames(env.cfg, env.cfg.EffectiveCityName(), env.store)
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		cfgNames,
+		env.cfg,
+		env.sp,
+		env.store,
+		nil,
+		[]beads.Bead{work},
+		nil,
+		env.dt,
+		map[string]int{"worker": 1},
+		false,
+		nil,
+		env.cfg.EffectiveCityName(),
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1 (asleep on_demand named session with assigned work must start)", woken)
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("asleep on_demand named session with assigned work was not started")
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.Metadata["config_wake_suppressed"] == "true" {
+		t.Fatal("assigned-work wake was suppressed by interactive idle-sleep policy")
+	}
+}
+
+func TestReconcilerWakeDemandOverridesSleepSuppressionForDirectAssignment(t *testing.T) {
+	policy := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveFresh}
+
+	assigned := AwakeDecision{ShouldWake: true, Reason: "assigned-work"}
+	if !wakeDemandOverridesSleepSuppression(assigned, wakeEvaluation{HasAssignedWork: true}, policy, nil, "worker", false) {
+		t.Fatal("direct assigned work should override interactive sleep suppression")
+	}
+	if wakeDemandOverridesSleepSuppression(assigned, wakeEvaluation{HasAssignedWork: true}, policy, nil, "worker", true) {
+		t.Fatal("explicit sleep intent should still win over assigned work")
+	}
+
+	namedDemand := AwakeDecision{ShouldWake: true, Reason: "named-demand"}
+	if !wakeDemandOverridesSleepSuppression(namedDemand, wakeEvaluation{}, policy, map[string]int{"worker": 1}, "worker", false) {
+		t.Fatal("named-session demand should override interactive sleep suppression")
+	}
+}
+
 func TestReconcilerWakeDemandOverridesSleepSuppressionForMinActive(t *testing.T) {
 	policy := resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume}
 	decision := AwakeDecision{ShouldWake: true, Reason: "min-active"}

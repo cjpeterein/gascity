@@ -57,6 +57,7 @@ var (
 		"codex":       {},
 		"gemini":      {},
 		"mimocode":    {},
+		"pi":          {},
 	}
 	supportedReadiness = readinessItemSet{
 		"antigravity": {},
@@ -65,6 +66,7 @@ var (
 		"gemini":      {},
 		"github_cli":  {},
 		"mimocode":    {},
+		"pi":          {},
 	}
 	readinessProbeSpecs = map[string]readinessProbeSpec{
 		"claude": {
@@ -98,6 +100,13 @@ var (
 			kind:        probeKindProvider,
 			probe: func(_ context.Context, homeDir string) providerProbeResult {
 				return probeMimoCode(homeDir)
+			},
+		},
+		"pi": {
+			displayName: "Pi Coding Agent",
+			kind:        probeKindProvider,
+			probe: func(_ context.Context, homeDir string) providerProbeResult {
+				return probePi(homeDir)
 			},
 		},
 		"github_cli": {
@@ -528,6 +537,89 @@ func mimoCodeAuthPath(homeDir string) string {
 		dataRoot = xdg
 	}
 	return filepath.Join(dataRoot, "mimocode", "auth.json")
+}
+
+// piProviderAPIKeyEnvVars lists the provider API-key environment variables the
+// pi CLI resolves credentials from, verified against
+// @earendil-works/pi-coding-agent 0.79.1 (pi-ai env-api-keys.js). The Vertex
+// ADC and AWS Bedrock multi-variable credential chains are intentionally
+// omitted; users relying on them can run `gc init --skip-provider-readiness`.
+var piProviderAPIKeyEnvVars = []string{
+	"AI_GATEWAY_API_KEY",
+	"ANT_LING_API_KEY",
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_OAUTH_TOKEN",
+	"AZURE_OPENAI_API_KEY",
+	"CEREBRAS_API_KEY",
+	"CLOUDFLARE_API_KEY",
+	"COPILOT_GITHUB_TOKEN",
+	"DEEPSEEK_API_KEY",
+	"FIREWORKS_API_KEY",
+	"GEMINI_API_KEY",
+	"GOOGLE_CLOUD_API_KEY",
+	"GROQ_API_KEY",
+	"HF_TOKEN",
+	"KIMI_API_KEY",
+	"MINIMAX_API_KEY",
+	"MINIMAX_CN_API_KEY",
+	"MISTRAL_API_KEY",
+	"MOONSHOT_API_KEY",
+	"NVIDIA_API_KEY",
+	"OPENAI_API_KEY",
+	"OPENCODE_API_KEY",
+	"OPENROUTER_API_KEY",
+	"TOGETHER_API_KEY",
+	"XAI_API_KEY",
+	"XIAOMI_API_KEY",
+	"XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+	"XIAOMI_TOKEN_PLAN_CN_API_KEY",
+	"XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+	"ZAI_API_KEY",
+	"ZAI_CODING_CN_API_KEY",
+}
+
+func probePi(homeDir string) providerProbeResult {
+	if _, ok := findProbeBinary("pi", homeDir); !ok {
+		return providerProbeResult{status: probeStatusNotInstalled, detail: "pi executable not found in probe PATH"}
+	}
+	if piProviderEnvKeyConfigured() {
+		return providerProbeResult{status: probeStatusConfigured}
+	}
+
+	data, err := os.ReadFile(filepath.Join(piAgentDir(homeDir), "auth.json"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return providerProbeResult{status: probeStatusNeedsAuth, detail: "missing ~/.pi/agent/auth.json and no recognized provider API key env vars"}
+		}
+		return providerProbeResult{status: probeStatusProbeError, detail: "failed to read ~/.pi/agent/auth.json"}
+	}
+
+	var credentials map[string]json.RawMessage
+	if err := json.Unmarshal(data, &credentials); err != nil {
+		return providerProbeResult{status: probeStatusProbeError, detail: "invalid JSON in ~/.pi/agent/auth.json"}
+	}
+	if len(credentials) == 0 {
+		return providerProbeResult{status: probeStatusNeedsAuth, detail: "~/.pi/agent/auth.json has no stored credentials and no recognized provider API key env vars"}
+	}
+	return providerProbeResult{status: probeStatusConfigured}
+}
+
+// piAgentDir mirrors pi's getAgentDir(): PI_CODING_AGENT_DIR overrides the
+// default ~/.pi/agent location.
+func piAgentDir(homeDir string) string {
+	if dir := strings.TrimSpace(os.Getenv("PI_CODING_AGENT_DIR")); dir != "" {
+		return dir
+	}
+	return filepath.Join(homeDir, ".pi", "agent")
+}
+
+func piProviderEnvKeyConfigured() bool {
+	for _, key := range piProviderAPIKeyEnvVars {
+		if nonEmptyString(os.Getenv(key)) {
+			return true
+		}
+	}
+	return false
 }
 
 func probeGitHubCLI(ctx context.Context, homeDir string) providerProbeResult {

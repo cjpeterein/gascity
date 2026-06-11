@@ -218,9 +218,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a shell value replaces an existing entry), and `gc supervisor run` loads
   the file at startup, filling only keys the service environment left unset.
   The first install after upgrading rewrites the service file without
-  credentials; rotate any previously inlined keys if your exposure posture
-  warrants. This also keeps fixing the older gap where credentials exported
-  only in an interactive shell were dropped at login or reboot.
+  credentials and migrates values the old file had inlined into
+  `secrets.env` (shell and existing file entries win over the old inlined
+  value), so existing setups keep working even when the upgrading shell does
+  not export every key; rotate any previously inlined keys if your exposure
+  posture warrants. This also keeps fixing the older gap where credentials
+  exported only in an interactive shell were dropped at login or reboot.
   `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` now suppresses the seeding scan (the
   service file is credential-free regardless); `GC_SUPERVISOR_ENV` opt-ins
   seed even with the flag set. Dotenv parse errors no longer echo the

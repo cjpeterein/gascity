@@ -1233,7 +1233,15 @@ func isSupervisorSecretEnv(key string) bool {
 // from the scan; an explicit GC_SUPERVISOR_ENV opt-in overrides the flag,
 // and GC_DOLT_PASSWORD is not a provider credential so the flag never
 // affects it.
-func supervisorInstallSecretEnv() map[string]string {
+//
+// harvested carries secret-class values recovered from a pre-migration
+// service file (see harvestSupervisorSecretEnvFromSystemdUnit /
+// harvestSupervisorSecretEnvFromLaunchdPlist). It is the lowest tier: a
+// harvested value fills a key only when the scan found nothing and the
+// existing secrets file has no entry — the unit was written from older
+// shell state, so anything fresher must win, and overriding a hand-rotated
+// file entry with a stale inlined value would undo the rotation.
+func supervisorInstallSecretEnv(harvested map[string]string) map[string]string {
 	omitProviderCreds := os.Getenv(supervisorOmitProviderCredsEnv) == "1"
 	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
 	explicitEnvKeySet := make(map[string]bool, len(explicitEnvKeys))
@@ -1282,12 +1290,74 @@ func supervisorInstallSecretEnv() map[string]string {
 			secrets[key] = val
 		}
 	}
+	if len(harvested) > 0 {
+		fileEntries := supervisorSecretsEnvFileEntries()
+		for key, val := range harvested {
+			if val == "" || !include(key) {
+				continue
+			}
+			if _, ok := secrets[key]; ok {
+				continue
+			}
+			if _, ok := fileEntries[key]; ok {
+				continue
+			}
+			secrets[key] = val
+		}
+	}
+	return secrets
+}
+
+// harvestSupervisorSecretEnvFromSystemdUnit extracts secret-class
+// Environment= entries from a pre-migration systemd unit so the
+// credential-free rewrite cannot drop a value the calling shell no longer
+// exports. Values may be bare or strconv-quoted — the systemdenv template
+// function quotes everything it writes, and gc writes one assignment per
+// Environment= line.
+func harvestSupervisorSecretEnvFromSystemdUnit(content string) map[string]string {
+	secrets := make(map[string]string)
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		entry, ok := strings.CutPrefix(line, "Environment=")
+		if !ok {
+			continue
+		}
+		key, val, ok := strings.Cut(entry, "=")
+		if !ok || !isSupervisorSecretEnv(key) {
+			continue
+		}
+		if unquoted, err := strconv.Unquote(val); err == nil {
+			val = unquoted
+		}
+		if val != "" {
+			secrets[key] = val
+		}
+	}
+	return secrets
+}
+
+// harvestSupervisorSecretEnvFromLaunchdPlist extracts secret-class entries
+// from a pre-migration launchd plist's EnvironmentVariables dict, mirroring
+// harvestSupervisorSecretEnvFromSystemdUnit for the darwin install path.
+func harvestSupervisorSecretEnvFromLaunchdPlist(data []byte) map[string]string {
+	secrets := make(map[string]string)
+	env, ok := launchdSupervisorEnvDict(data)
+	if !ok {
+		return secrets
+	}
+	for key, val := range env {
+		if val.text == "" || !isSupervisorSecretEnv(key) {
+			continue
+		}
+		secrets[key] = val.text
+	}
 	return secrets
 }
 
 // supervisorSecretsEnvFileName is the dotenv-style file under GC_HOME that
-// supervisorServiceExtraEnv merges as a persistent, machine-local source of
-// provider credentials and other allowlisted service env.
+// holds secret-class supervisor env: seeded by the install scan
+// (mergeSupervisorSecretsEnvFile) and loaded into the process env by
+// `gc supervisor run` (loadSupervisorSecretsEnvIntoProcessEnv).
 const supervisorSecretsEnvFileName = "secrets.env"
 
 // supervisorSecretsEnvFilePath returns the absolute path to the supervisor
@@ -1713,14 +1783,29 @@ type plistValue struct {
 }
 
 func launchdSupervisorHome(data []byte) (string, bool) {
+	env, ok := launchdSupervisorEnvDict(data)
+	if !ok {
+		return "", false
+	}
+	gcHome, ok := env["GC_HOME"]
+	if !ok || gcHome.text == "" {
+		return "", false
+	}
+	return filepath.Clean(gcHome.text), true
+}
+
+// launchdSupervisorEnvDict parses a launchd plist and returns its root
+// EnvironmentVariables dict, or false when the plist is unreadable or has no
+// such dict.
+func launchdSupervisorEnvDict(data []byte) (map[string]plistValue, bool) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
-			return "", false
+			return nil, false
 		}
 		if err != nil {
-			return "", false
+			return nil, false
 		}
 		start, ok := tok.(xml.StartElement)
 		if !ok || start.Name.Local != "dict" {
@@ -1728,17 +1813,13 @@ func launchdSupervisorHome(data []byte) (string, bool) {
 		}
 		root, err := parsePlistDict(dec)
 		if err != nil {
-			return "", false
+			return nil, false
 		}
 		env, ok := root["EnvironmentVariables"]
 		if !ok || env.dict == nil {
-			return "", false
+			return nil, false
 		}
-		gcHome, ok := env.dict["GC_HOME"]
-		if !ok || gcHome.text == "" {
-			return "", false
-		}
-		return filepath.Clean(gcHome.text), true
+		return env.dict, true
 	}
 }
 
@@ -1958,9 +2039,10 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 	// ${GC_HOME}/secrets.env instead of the plist — before the
 	// content-unchanged early return, so a credential newly exported in
 	// the shell still reaches the file even when the plist needs no
-	// rewrite. Failing the install on seed failure is deliberate: the
-	// plist no longer carries these values.
-	if err := mergeSupervisorSecretsEnvFile(supervisorInstallSecretEnv()); err != nil {
+	// rewrite. Values inlined by a pre-migration plist are harvested as the
+	// lowest tier so the rewrite cannot drop them. Failing the install on
+	// seed failure is deliberate: the plist no longer carries these values.
+	if err := mergeSupervisorSecretsEnvFile(supervisorInstallSecretEnv(harvestSupervisorSecretEnvFromLaunchdPlist(existing))); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2124,10 +2206,12 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 	}
 
 	// Seed secret-class env (provider credentials, GC_DOLT_PASSWORD) into
-	// ${GC_HOME}/secrets.env instead of the unit. Failing the install here
-	// is deliberate: the unit no longer carries these values, so dropping
-	// the seed would silently strand credentials until the next install.
-	if err := mergeSupervisorSecretsEnvFile(supervisorInstallSecretEnv()); err != nil {
+	// ${GC_HOME}/secrets.env instead of the unit. Values inlined by a
+	// pre-migration unit are harvested as the lowest tier so the rewrite
+	// cannot drop them. Failing the install here is deliberate: the unit
+	// no longer carries these values, so dropping the seed would silently
+	// strand credentials until the next install.
+	if err := mergeSupervisorSecretsEnvFile(supervisorInstallSecretEnv(harvestSupervisorSecretEnvFromSystemdUnit(string(existing)))); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

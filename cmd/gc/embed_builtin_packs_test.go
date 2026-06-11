@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1724,6 +1725,172 @@ func TestMaterializeFS_ManifestPrunesStaleEntriesWhenEmbedFileRemoved(t *testing
 	if _, err := os.Stat(filepath.Join(dst, "b.txt")); err != nil {
 		t.Fatalf("b.txt should remain on disk for pruneStaleGeneratedPackFiles to handle: %v", err)
 	}
+}
+
+func TestMaterializeFS_ManifestBackfillsUntrackedFileMatchingEmbedded(t *testing.T) {
+	dst := t.TempDir()
+	const rel = "assets/scripts/check.sh"
+	const content = "#!/bin/sh\necho check\n"
+	writeFileForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), []byte(content), 0o755)
+
+	var warnings bytes.Buffer
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte(content), Mode: 0o755},
+	}, dst, true, &warnings)
+
+	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), content)
+	assertNoWarningForTest(t, warnings.String())
+	manifest := readPackHashManifestForTest(t, dst)
+	want := map[string]string{rel: sha256HexForTest([]byte(content))}
+	assertManifestEqualsForTest(t, manifest, want)
+}
+
+func TestMaterializeFS_ManifestBackfillEnablesFutureRefresh(t *testing.T) {
+	dst := t.TempDir()
+	const rel = "assets/scripts/check.sh"
+	const v1 = "#!/bin/sh\necho v1\n"
+	const v2 = "#!/bin/sh\necho v2\n"
+	// Pre-manifest deployment: v1 on disk and no manifest sidecar.
+	writeFileForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), []byte(v1), 0o755)
+
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte(v1), Mode: 0o755},
+	}, dst, true, nil)
+
+	var warnings bytes.Buffer
+	materializeFSForTest(t, fstest.MapFS{
+		rel: {Data: []byte(v2), Mode: 0o755},
+	}, dst, true, &warnings)
+
+	assertFileContentForTest(t, filepath.Join(dst, filepath.FromSlash(rel)), v2)
+	assertNoWarningForTest(t, warnings.String())
+}
+
+func TestRepairStaleDoltDogDoctorScript_RefreshesPreManifestGeneratedVersion(t *testing.T) {
+	staleData := readTestdataForTest(t, "mol-dog-doctor-pre-manifest-2026-05-17.sh")
+	if _, ok := preManifestDoltDogDoctorSHA256s[sha256HexForTest(staleData)]; !ok {
+		t.Fatalf("testdata digest %s missing from preManifestDoltDogDoctorSHA256s", sha256HexForTest(staleData))
+	}
+
+	city := t.TempDir()
+	packDir := filepath.Join(city, citylayout.SystemPacksRoot, "dolt")
+	dst := filepath.Join(packDir, filepath.FromSlash(doltDogDoctorScriptRel))
+	writeFileForTest(t, dst, staleData, 0o755)
+
+	if err := repairStaleDoltDogDoctorScript(city); err != nil {
+		t.Fatalf("repairStaleDoltDogDoctorScript: %v", err)
+	}
+
+	embeddedData := readEmbeddedDoltFileForTest(t, doltDogDoctorScriptRel)
+	assertFileContentForTest(t, dst, string(embeddedData))
+	if !strings.Contains(string(embeddedData), "BACKUP_ELIGIBLE_DBS") {
+		t.Fatal("embedded dog-doctor script lost the backup-eligibility gate (gc-3p4)")
+	}
+	manifest := readPackHashManifestForTest(t, packDir)
+	if got, want := manifest[doltDogDoctorScriptRel], sha256HexForTest(embeddedData); got != want {
+		t.Fatalf("manifest[%q] = %q, want refreshed hash %q", doltDogDoctorScriptRel, got, want)
+	}
+}
+
+func TestRepairStaleDoltDogDoctorScript_PreservesOperatorEdit(t *testing.T) {
+	city := t.TempDir()
+	packDir := filepath.Join(city, citylayout.SystemPacksRoot, "dolt")
+	dst := filepath.Join(packDir, filepath.FromSlash(doltDogDoctorScriptRel))
+	const operatorEdit = "#!/bin/sh\necho operator-tuned doctor\n"
+	writeFileForTest(t, dst, []byte(operatorEdit), 0o755)
+
+	if err := repairStaleDoltDogDoctorScript(city); err != nil {
+		t.Fatalf("repairStaleDoltDogDoctorScript: %v", err)
+	}
+
+	assertFileContentForTest(t, dst, operatorEdit)
+	if _, err := os.Stat(filepath.Join(packDir, testPackHashManifestFile)); !os.IsNotExist(err) {
+		t.Fatalf("manifest stat after preserved operator edit = %v, want not-exist", err)
+	}
+}
+
+func TestRepairStaleDoltDogDoctorScript_LeavesManifestTrackedFileAlone(t *testing.T) {
+	city := t.TempDir()
+	packDir := filepath.Join(city, citylayout.SystemPacksRoot, "dolt")
+	dst := filepath.Join(packDir, filepath.FromSlash(doltDogDoctorScriptRel))
+	staleData := readTestdataForTest(t, "mol-dog-doctor-pre-manifest-2026-05-17.sh")
+	writeFileForTest(t, dst, staleData, 0o755)
+	writeFileForTest(t, filepath.Join(packDir, testPackHashManifestFile),
+		[]byte(`{"assets/scripts/mol-dog-doctor.sh":"deadbeef"}`), 0o644)
+
+	if err := repairStaleDoltDogDoctorScript(city); err != nil {
+		t.Fatalf("repairStaleDoltDogDoctorScript: %v", err)
+	}
+
+	assertFileContentForTest(t, dst, string(staleData))
+	manifest := readPackHashManifestForTest(t, packDir)
+	if got := manifest[doltDogDoctorScriptRel]; got != "deadbeef" {
+		t.Fatalf("manifest[%q] = %q, want untouched entry %q", doltDogDoctorScriptRel, got, "deadbeef")
+	}
+}
+
+func TestRepairStaleDoltDogDoctorScript_MissingScriptIsNoOp(t *testing.T) {
+	city := t.TempDir()
+	if err := repairStaleDoltDogDoctorScript(city); err != nil {
+		t.Fatalf("repairStaleDoltDogDoctorScript: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(city, citylayout.SystemPacksRoot, "dolt")); !os.IsNotExist(err) {
+		t.Fatalf("dolt pack dir stat after no-op repair = %v, want not-exist", err)
+	}
+}
+
+func TestMaterializeBuiltinPacksRefreshesPreManifestDoltDogDoctorScript(t *testing.T) {
+	city := t.TempDir()
+	if err := MaterializeBuiltinPacks(city); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+	packDir := filepath.Join(city, citylayout.SystemPacksRoot, "dolt")
+	dst := filepath.Join(packDir, filepath.FromSlash(doltDogDoctorScriptRel))
+
+	// Simulate a pre-manifest deployment: stale generated content on disk
+	// and no manifest entry for the file.
+	staleData := readTestdataForTest(t, "mol-dog-doctor-pre-manifest-2026-05-17.sh")
+	writeFileForTest(t, dst, staleData, 0o755)
+	manifest := readPackHashManifestForTest(t, packDir)
+	delete(manifest, doltDogDoctorScriptRel)
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshaling manifest: %v", err)
+	}
+	writeFileForTest(t, filepath.Join(packDir, testPackHashManifestFile), manifestJSON, 0o644)
+
+	if err := MaterializeBuiltinPacks(city); err != nil {
+		t.Fatalf("MaterializeBuiltinPacks() error: %v", err)
+	}
+
+	embeddedData := readEmbeddedDoltFileForTest(t, doltDogDoctorScriptRel)
+	assertFileContentForTest(t, dst, string(embeddedData))
+	manifest = readPackHashManifestForTest(t, packDir)
+	if got, want := manifest[doltDogDoctorScriptRel], sha256HexForTest(embeddedData); got != want {
+		t.Fatalf("manifest[%q] = %q, want refreshed hash %q", doltDogDoctorScriptRel, got, want)
+	}
+}
+
+func readTestdataForTest(t *testing.T, name string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("ReadFile(testdata/%s): %v", name, err)
+	}
+	return data
+}
+
+func readEmbeddedDoltFileForTest(t *testing.T, rel string) []byte {
+	t.Helper()
+	bp, ok := builtinpacks.ByName("dolt")
+	if !ok {
+		t.Fatal("builtin dolt pack missing from registry")
+	}
+	data, err := fs.ReadFile(bp.FS, rel)
+	if err != nil {
+		t.Fatalf("fs.ReadFile(dolt, %s): %v", rel, err)
+	}
+	return data
 }
 
 func materializeFSForTest(t *testing.T, embedded fstest.MapFS, dstDir string, preserveOperatorEdits bool, warnings io.Writer) map[string]struct{} {

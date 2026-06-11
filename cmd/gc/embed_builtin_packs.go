@@ -81,6 +81,9 @@ func MaterializeBuiltinPacks(cityPath string) error {
 	if err := repairLegacyGcBeadsBdScript(cityPath); err != nil {
 		return fmt.Errorf("repairing legacy gc-beads-bd script: %w", err)
 	}
+	if err := repairStaleDoltDogDoctorScript(cityPath); err != nil {
+		return fmt.Errorf("repairing stale dolt dog-doctor script: %w", err)
+	}
 	return nil
 }
 
@@ -419,7 +422,25 @@ func materializeFS(embedded fs.FS, dstDir string, preserveOperatorEdits bool, w 
 						}
 						// On-disk hash matches manifest: stale embed, fall through to refresh.
 					} else {
-						// No manifest entry: conservatively preserve without warning.
+						// No manifest entry: a pre-manifest deployment is
+						// indistinguishable from an operator edit, except when
+						// the on-disk bytes equal the embedded bytes. Adopting
+						// that provably-unedited file into the manifest lets
+						// future embedded updates refresh it instead of
+						// freezing it at the pre-manifest content (gc-3p4).
+						// Differing content is conservatively preserved
+						// without a warning.
+						onDiskData, readErr := os.ReadFile(dst)
+						if readErr != nil {
+							return fmt.Errorf("reading %s for embedded comparison: %w", dst, readErr)
+						}
+						embeddedData, embErr := fs.ReadFile(embedded, path)
+						if embErr != nil {
+							return fmt.Errorf("reading embedded %s: %w", path, embErr)
+						}
+						if bytes.Equal(onDiskData, embeddedData) {
+							pendingManifest[rel] = sha256Hex(embeddedData)
+						}
 						return nil
 					}
 				}
@@ -524,6 +545,75 @@ city_root=$(cd "$script_dir/../.." && pwd)
 
 exec "$city_root/.gc/system/packs/bd/assets/scripts/gc-beads-bd.sh" "$@"
 `)
+}
+
+// doltDogDoctorScriptRel is the dolt pack-relative path of the dog-doctor
+// health-check script targeted by repairStaleDoltDogDoctorScript.
+const doltDogDoctorScriptRel = "assets/scripts/mol-dog-doctor.sh"
+
+// preManifestDoltDogDoctorSHA256s holds the SHA-256 digest of every embedded
+// revision of the dolt pack's mol-dog-doctor.sh that shipped before the pack
+// hash manifest existed (#3173). A materialized copy with no manifest entry
+// whose digest matches one of these is provably stale binary-generated
+// content, not an operator edit, so it is safe to refresh. Pre-manifest
+// cities were otherwise frozen on a dog-doctor without the backup-eligibility
+// gate and mailed false "backup missing" advisories every patrol cycle
+// (gc-3p4). The set is closed: revisions shipped after the manifest feature
+// always have manifest entries, so do not add new digests.
+var preManifestDoltDogDoctorSHA256s = map[string]struct{}{
+	"24fd8da6eecc33d17bac81bbcc6201f11ca65bbfd690d8f1ed1b5676f7fdcf76": {}, // 2026-05-09 edce24c70
+	"d52394fb1f6e9c981b605bb7a70a0b693ebeb20acde7fc876af0988e0625718e": {}, // 2026-05-10 f94c244a1
+	"a2efcdeb712072a443de70904d6541988b50c10333cd4634378b7c8b9dafeefc": {}, // 2026-05-17 6e25d7b3f
+	"68d00ca6e05cfa63c575042c7b6ca0530d062125ce0b7e8a6dff14c2371bcdda": {}, // 2026-05-20 8f268621f
+	"ffdeb759892e7e577b7171a14b5f7f9cb87f27e8f2daa05f1f1e3bb4539311ff": {}, // 2026-05-25 af092a478
+	"8e21f76e827168b088635f1045bea15c2c26c2faf1cc713bb842d8ec7232d94c": {}, // 2026-06-01 4fb0c6f52
+}
+
+// repairStaleDoltDogDoctorScript refreshes a materialized dolt dog-doctor
+// script that a pre-manifest binary wrote and the manifest migration path
+// then froze (no manifest entry means materializeFS preserves the file as a
+// potential operator edit). Only content whose digest matches a known
+// pre-manifest embedded revision is rewritten; anything else — including
+// genuine operator edits — is left untouched. The refreshed file gets a
+// manifest entry so the normal refresh flow owns it from then on.
+func repairStaleDoltDogDoctorScript(cityPath string) error {
+	packDir := filepath.Join(cityPath, citylayout.SystemPacksRoot, "dolt")
+	dst := filepath.Join(packDir, filepath.FromSlash(doltDogDoctorScriptRel))
+	info, err := os.Lstat(dst)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	manifest := readPackHashManifest(packDir)
+	if _, tracked := manifest[doltDogDoctorScriptRel]; tracked {
+		return nil
+	}
+	onDisk, err := os.ReadFile(dst)
+	if err != nil {
+		return err
+	}
+	if _, stale := preManifestDoltDogDoctorSHA256s[sha256Hex(onDisk)]; !stale {
+		return nil
+	}
+	bp, ok := builtinPackByName("dolt")
+	if !ok {
+		return fmt.Errorf("builtin dolt pack missing from registry")
+	}
+	data, err := fs.ReadFile(bp.FS, doltDogDoctorScriptRel)
+	if err != nil {
+		return fmt.Errorf("reading embedded dolt %s: %w", doltDogDoctorScriptRel, err)
+	}
+	perm := builtinpacks.MaterializedFileMode(doltDogDoctorScriptRel)
+	if err := fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, dst, data, perm); err != nil {
+		return err
+	}
+	manifest[doltDogDoctorScriptRel] = sha256Hex(data)
+	return writePackHashManifest(packDir, manifest)
 }
 
 // pruneLegacyEmbeddedOrders removes deprecated order directory layouts when the

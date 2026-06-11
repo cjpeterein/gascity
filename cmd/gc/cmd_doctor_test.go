@@ -73,6 +73,7 @@ func TestDoctorJSONSuccessIsParseableJSONOnly(t *testing.T) {
 }
 
 func TestDoctorSkipsDoltChecksTreatsExecGcBeadsBdAsBdContract(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityDir := t.TempDir()
 	t.Setenv("GC_BEADS", "exec:"+gcBeadsBdScriptPath(cityDir))
 	if doctorSkipsDoltChecks(cityDir) {
@@ -81,6 +82,7 @@ func TestDoctorSkipsDoltChecksTreatsExecGcBeadsBdAsBdContract(t *testing.T) {
 }
 
 func TestDoctorSkipsDoltChecksDetectsBdRigUnderFileBackedCity(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
@@ -109,6 +111,7 @@ prefix = "fe"
 }
 
 func TestManagedDoltOpsCheckSkipKeepsCityManagedWorkspaceEnabled(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
@@ -137,6 +140,7 @@ func TestManagedDoltOpsCheckSkipOnConfigError(t *testing.T) {
 }
 
 func TestManagedDoltOpsCheckUsesDoctorApplicabilityOnConfigError(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -157,6 +161,7 @@ func TestManagedDoltOpsCheckUsesDoctorApplicabilityOnConfigError(t *testing.T) {
 }
 
 func TestManagedDoltOpsCheckDiscoversRigMetadataOnConfigError(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\n"), 0o644); err != nil {
@@ -175,6 +180,7 @@ func TestManagedDoltOpsCheckDiscoversRigMetadataOnConfigError(t *testing.T) {
 }
 
 func TestDoDoctorRunsCityDoltCheckForInheritedBdRigUnderFileBackedCity(t *testing.T) {
+	enableManagedDoltForTest(t)
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "frontend")
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {

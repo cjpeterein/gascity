@@ -505,7 +505,7 @@ func TestSnapshotDoltProcessPIDs_EnumeratorErrorIsFatal(t *testing.T) {
 	}
 }
 
-func TestSnapshotDoltProcessesForConfigRootFiltersToPrivateTempRoot(t *testing.T) {
+func TestSnapshotOwnedDoltProcessesFiltersToPrivateTempRoot(t *testing.T) {
 	root := filepath.Join("/tmp", "gc-cmd-test-root")
 	owned := DoltProcInfo{
 		PID: 1001,
@@ -525,11 +525,13 @@ func TestSnapshotDoltProcessesForConfigRootFiltersToPrivateTempRoot(t *testing.T
 			filepath.Join("/tmp", "TestOther", "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml"),
 		},
 	}
-	got, err := snapshotDoltProcessesForConfigRoot(func() ([]DoltProcInfo, error) {
+	g := newDoltLeakGuardedTestingM(nil, root)
+	g.attributedToParent = func(int) bool { return false }
+	got, err := g.snapshotOwnedDoltProcesses(func() ([]DoltProcInfo, error) {
 		return []DoltProcInfo{owned, unowned}, nil
-	}, root)
+	})
 	if err != nil {
-		t.Fatalf("snapshotDoltProcessesForConfigRoot: %v", err)
+		t.Fatalf("snapshotOwnedDoltProcesses: %v", err)
 	}
 	if len(got) != 1 || got[1001].PID != 1001 {
 		t.Fatalf("snapshot = %#v, want only owned PID 1001", got)
@@ -598,5 +600,137 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 	}
 	if !registeredReaped {
 		t.Fatal("registered process reaper was not called after leak detection")
+	}
+}
+
+func TestEnvironAttributesDoltToTestParent(t *testing.T) {
+	environ := func(entries ...string) []byte {
+		return []byte(strings.Join(entries, "\x00") + "\x00")
+	}
+	tests := []struct {
+		name    string
+		environ []byte
+		pid     int
+		want    bool
+	}{
+		{
+			name:    "matching parent pid",
+			environ: environ("PATH=/bin", managedDoltTestParentPIDEnv+"=4242", "HOME=/home/u"),
+			pid:     4242,
+			want:    true,
+		},
+		{
+			name:    "different parent pid",
+			environ: environ(managedDoltTestParentPIDEnv + "=999"),
+			pid:     4242,
+			want:    false,
+		},
+		{
+			name:    "marker absent",
+			environ: environ("PATH=/bin", "GC_CITY=/tmp/somewhere"),
+			pid:     4242,
+			want:    false,
+		},
+		{
+			name:    "empty environ",
+			environ: nil,
+			pid:     4242,
+			want:    false,
+		},
+		{
+			name:    "malformed value",
+			environ: environ(managedDoltTestParentPIDEnv + "=not-a-pid"),
+			pid:     4242,
+			want:    false,
+		},
+		{
+			name:    "prefix collision is not a match",
+			environ: environ(managedDoltTestParentPIDEnv + "_EXTRA=4242"),
+			pid:     4242,
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := environAttributesDoltToTestParent(tt.environ, tt.pid); got != tt.want {
+				t.Fatalf("environAttributesDoltToTestParent(%q, %d) = %v, want %v", tt.environ, tt.pid, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSnapshotOwnedDoltProcessesIncludesEnvAttributedOutsideRoot(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "gct12345-current")
+	underRoot := DoltProcInfo{
+		PID:  2001,
+		Argv: []string{"dolt", "sql-server", "--config", filepath.Join(tempRoot, "case", "dolt-config.yaml")},
+	}
+	attributedOutsideRoot := DoltProcInfo{
+		PID:  2002,
+		Argv: []string{"dolt", "sql-server", "--config", "/tmp/fixed-city/.gc/runtime/packs/dolt/dolt-config.yaml"},
+	}
+	unrelatedOutsideRoot := DoltProcInfo{
+		PID:  2003,
+		Argv: []string{"dolt", "sql-server", "--config", "/srv/production/dolt-config.yaml"},
+	}
+	enumerate := func() ([]DoltProcInfo, error) {
+		return []DoltProcInfo{underRoot, attributedOutsideRoot, unrelatedOutsideRoot}, nil
+	}
+	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+	g.attributedToParent = func(pid int) bool { return pid == attributedOutsideRoot.PID }
+
+	got, err := g.snapshotOwnedDoltProcesses(enumerate)
+	if err != nil {
+		t.Fatalf("snapshotOwnedDoltProcesses: %v", err)
+	}
+
+	if _, ok := got[underRoot.PID]; !ok {
+		t.Errorf("snapshot missing config-under-root process %d", underRoot.PID)
+	}
+	if _, ok := got[attributedOutsideRoot.PID]; !ok {
+		t.Errorf("snapshot missing env-attributed process %d outside temp root", attributedOutsideRoot.PID)
+	}
+	if _, ok := got[unrelatedOutsideRoot.PID]; ok {
+		t.Errorf("snapshot wrongly includes unrelated process %d", unrelatedOutsideRoot.PID)
+	}
+}
+
+// TestDoltLeakGuardedTestingMFailsOnEnvAttributedLeakOutsideTempRoot is the
+// regression guard for gc-6ut: a managed dolt server booted for a fixed city
+// path (e.g. the literal /tmp/city) lives outside the test temp root, so the
+// config-path scan alone never saw it. Attribution via the
+// GC_MANAGED_DOLT_TEST_PARENT_PID env marker must catch it, fail the run,
+// and reap the process.
+func TestDoltLeakGuardedTestingMFailsOnEnvAttributedLeakOutsideTempRoot(t *testing.T) {
+	tempRoot := filepath.Join(t.TempDir(), "gct12345-current")
+	leaked := DoltProcInfo{
+		PID:  3001,
+		Argv: []string{"dolt", "sql-server", "--config", "/tmp/fixed-city/.gc/runtime/packs/dolt/dolt-config.yaml"},
+	}
+	var scan int
+	enumerate := func() ([]DoltProcInfo, error) {
+		scan++
+		if scan == 1 {
+			return nil, nil
+		}
+		return []DoltProcInfo{leaked}, nil
+	}
+	var reapedLeaks []DoltProcInfo
+	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+	g.attributedToParent = func(pid int) bool { return pid == leaked.PID }
+
+	code := g.runWith(
+		func() int { return 0 },
+		enumerate,
+		func(string) bool { return false },
+		func() {},
+		func(leaked []DoltProcInfo) { reapedLeaks = append(reapedLeaks, leaked...) },
+	)
+
+	if code != 1 {
+		t.Fatalf("guard returned code %d, want 1 for env-attributed leak outside temp root", code)
+	}
+	if len(reapedLeaks) != 1 || reapedLeaks[0].PID != leaked.PID {
+		t.Fatalf("reaped leaks = %#v, want only PID %d", reapedLeaks, leaked.PID)
 	}
 }

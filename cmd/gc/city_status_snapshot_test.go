@@ -662,7 +662,7 @@ func TestCityStatusObservationsRunInParallel(t *testing.T) {
 	}
 
 	start := time.Now()
-	snapshot := collectCityStatusSnapshot(runtime.NewFake(), cfg, "/tmp/city", nil, io.Discard)
+	snapshot := collectCityStatusSnapshot(runtime.NewFake(), cfg, t.TempDir(), nil, io.Discard)
 	elapsed := time.Since(start)
 
 	if got := len(snapshot.Agents); got != agentCount {

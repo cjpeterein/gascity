@@ -104,7 +104,11 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				Label:         input.Label,
 				Assignee:      assignee,
 				IncludeClosed: input.All,
-				Live:          input.Status == "in_progress",
+				// in_progress reads are live so lifecycle gates observe
+				// backing-store writes immediately; cached=true callers
+				// (e.g. the gc hook render path) explicitly accept cache
+				// staleness in exchange for not touching the data plane.
+				Live: input.Status == "in_progress" && !input.Cached,
 				// Explicit sort: with SortDefault the CachingStore returns
 				// map-iteration order, so a bounded read truncated an
 				// arbitrary, per-call-different subset (#3208).
@@ -287,7 +291,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return
 		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(store).Live.Ready()
+		ready, err := readyBeadsForRig(store, input.Cached)
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record(label, err)
@@ -339,6 +343,22 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			PartialErrors: pa.messages(),
 		},
 	}, nil
+}
+
+// readyBeadsForRig reads one rig's ready beads through the requested handle.
+// The default is the live reader so dispatch consumers observe backing-store
+// writes immediately. cached callers read the supervisor cache first and only
+// fall back to the live reader when the cache cannot answer, so a hot render
+// path (gc hook per status-line tick) costs no data-plane queries.
+func readyBeadsForRig(store beads.Store, cached bool) ([]beads.Bead, error) {
+	handles := beads.HandlesFor(store)
+	if cached {
+		ready, err := handles.Cached.Ready()
+		if err == nil {
+			return ready, nil
+		}
+	}
+	return handles.Live.Ready()
 }
 
 // humaHandleBeadGraph is the Huma-typed handler for GET /v0/beads/graph/{rootID}.

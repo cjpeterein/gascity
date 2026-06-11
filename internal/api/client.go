@@ -793,7 +793,9 @@ func (c *Client) CheckConvoy(id string) (CachedRead[ConvoyCheckView], error) {
 // ListBeadsOpts is the optional filter set for ListBeads. All fields are
 // zero-valued by default; the server falls back to its own defaults when a
 // field is empty. All mirrors the CLI --all flag and maps to the server's
-// IncludeClosed query semantic.
+// IncludeClosed query semantic. Cached requests supervisor-cache serving:
+// in_progress reads lose the live lifecycle-gate guarantee and may lag
+// direct backing-store writes by one cache reconcile interval.
 type ListBeadsOpts struct {
 	Status   string
 	Type     string
@@ -802,6 +804,7 @@ type ListBeadsOpts struct {
 	Rig      string
 	Limit    int
 	All      bool
+	Cached   bool
 }
 
 // ListBeads fetches beads across all rigs via
@@ -838,7 +841,50 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 		t := true
 		params.All = &t
 	}
+	if opts.Cached {
+		t := true
+		params.Cached = &t
+	}
 	resp, err := c.cw.GetV0CityByCityNameBeadsWithResponse(context.Background(), c.cityName, params)
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), resp.ApplicationproblemJSONDefault); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	return CachedRead[[]beads.Bead]{
+		Body:       beadsFromGenList(resp.JSON200),
+		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	}, nil
+}
+
+// ListReadyBeads fetches ready beads across all rigs via
+// GET /v0/city/{cityName}/beads/ready. The endpoint is served from the
+// supervisor cache projection so controller-side consumers can avoid direct
+// backing-store reads.
+func (c *Client) ListReadyBeads() (CachedRead[[]beads.Bead], error) {
+	return c.listReadyBeads(&genclient.GetV0CityByCityNameBeadsReadyParams{})
+}
+
+// ListReadyBeadsCached fetches ready beads across all rigs like
+// ListReadyBeads, but asks the server to answer from the supervisor cache
+// (falling back to a live read per rig when the cache cannot answer).
+// Results may lag direct backing-store writes by one cache reconcile
+// interval; freshness-sensitive dispatch consumers should use
+// ListReadyBeads instead.
+func (c *Client) ListReadyBeadsCached() (CachedRead[[]beads.Bead], error) {
+	cached := true
+	return c.listReadyBeads(&genclient.GetV0CityByCityNameBeadsReadyParams{Cached: &cached})
+}
+
+func (c *Client) listReadyBeads(params *genclient.GetV0CityByCityNameBeadsReadyParams) (CachedRead[[]beads.Bead], error) {
+	if err := c.requireCityScope(); err != nil {
+		return CachedRead[[]beads.Bead]{}, err
+	}
+	resp, err := c.cw.GetV0CityByCityNameBeadsReadyWithResponse(context.Background(), c.cityName, params)
 	if err != nil {
 		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}

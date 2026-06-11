@@ -64,12 +64,19 @@ Two rules govern your inter-wisp behavior. Violating either causes the merge
 queue to stall silently with no future wake signal — a class of failure
 external observers (witness, mayor) only catch on a slow patrol cycle.
 
+Both rules resolve the current wisp with the same lookup. Wisp roots are
+`issue_type=molecule`, and bd hides the ephemeral wisp tier unless
+`--include-infra` is passed — so the lookup must filter
+`--type=molecule --include-infra`, never `--type=wisp` (not a valid bd
+type; it matches nothing, the fallback resolves empty, and the current
+wisp leaks in_progress while its successor is poured anyway).
+
 ### 1. ALWAYS pour the next wisp before burning the current one
 
 ```bash
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --include-infra --limit=1 --json | jq -r '.[0].id // empty')
 fi
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
@@ -114,7 +121,7 @@ assign the next wisp, burn the current wisp, THEN request restart**:
 ```bash
 CURRENT_WISP=${GC_BEAD_ID:-}
 if [ -z "$CURRENT_WISP" ]; then
-  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')
+  CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --include-infra --limit=1 --json | jq -r '.[0].id // empty')
 fi
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id // empty')
 if [ -z "$NEXT" ]; then
@@ -181,12 +188,30 @@ for ORPHAN in $ORPHANS; do
   # surfaces beads the inbox missed.
 done
 
-# Step 1: Check for an in-progress patrol wisp
-{{ .AssignedInProgressQuery }}
+# Step 1: Reconcile your patrol wisps to exactly one. Collect every
+# in_progress/open patrol wisp assigned to you, keep one (prefers
+# in_progress), and burn the surplus so restarts sweep leaked wisps
+# instead of accumulating them. Wisp roots are issue_type=molecule —
+# filter --type=molecule (never --type=wisp, which is not a valid bd
+# type and matches nothing) and pass --include-infra (without it bd
+# list hides the ephemeral wisp tier).
+WISP_IDS=$(
+  gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --include-infra --limit=0 --json | jq -r '.[].id'
+  gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --include-infra --limit=0 --json | jq -r '.[].id'
+)
+WISP=$(printf '%s\n' $WISP_IDS | sed -n '1p')           # keep one (prefers in_progress)
+for extra in $(printf '%s\n' $WISP_IDS | sed '1d'); do  # burn any surplus
+  gc bd mol burn "$extra" --force
+done
 
-# If none found, pour one (root-only — no child step beads) and assign it
-WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
-gc bd update "$WISP" --assignee="$GC_AGENT"
+# Step 2: Already have a wisp? Resume it. Otherwise pour one (root-only —
+# no child step beads) and assign it.
+if [ -n "$WISP" ]; then
+  echo "Resuming patrol wisp $WISP"
+else
+  WISP=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{ .DefaultBranch }} --var rig_name={{ .RigName }} --var binding_prefix={{ .BindingPrefix }} --json | jq -r '.new_epic_id')
+  gc bd update "$WISP" --assignee="$GC_AGENT"
+fi
 ```
 
 Then follow the formula. The step descriptions below are your instructions —

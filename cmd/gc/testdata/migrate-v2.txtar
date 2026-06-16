@@ -46,7 +46,6 @@ provider = "claude"
 prompt_template = "prompts/mayor.md"
 overlay_dir = "overlays/mayor"
 namepool = "namepools/mayor.txt"
-fallback = true
 
 [[agent]]
 name = "wolf"

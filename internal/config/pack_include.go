@@ -221,7 +221,15 @@ func packsLockFingerprint(lockPath string) string {
 // absent or has no entry for source.
 func resolveRemoteImportCacheDir(source, cityRoot string) (string, bool, error) {
 	lockPath := filepath.Join(cityRoot, "packs.lock")
-	key := source + "\x00" + cityRoot + "\x00" + packsLockFingerprint(lockPath)
+	cacheRoot, err := RepoCacheRoot()
+	if err != nil {
+		return "", false, err
+	}
+	// The cache root (GC_REPO_CACHE_ROOT / GC_HOME / $HOME-derived) is part of
+	// the key: the resolved cacheDir lives under it, so two callers that share a
+	// cityRoot but resolve different roots (e.g. tests that relocate HOME) must
+	// not collide on a memo entry pointing into the other's cache.
+	key := cacheRoot + "\x00" + source + "\x00" + cityRoot + "\x00" + packsLockFingerprint(lockPath)
 	if v, ok := remoteImportResolutionCache.Load(key); ok {
 		return v.(string), true, nil
 	}
@@ -243,10 +251,6 @@ func resolveRemoteImportCacheDir(source, cityRoot string) (string, bool, error) 
 		return "", false, nil
 	}
 
-	cacheRoot, err := RepoCacheRoot()
-	if err != nil {
-		return "", false, err
-	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
 		return "", false, err
@@ -449,49 +453,10 @@ func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit stri
 	if err := WithRepoCacheReadLock(cacheRoot, func() error {
 		return validateInstalledRemoteCache(source, cacheDir, commit)
 	}); err != nil {
-		// A synthetic bundled-pack cache is a deterministic projection of the
-		// running binary's embedded packs, so two faults are rebuildable
-		// in-process with no network: a content-hash mismatch (the binary was
-		// rebuilt) and an absent cache (cold or isolated cache root). Self-heal
-		// those instead of bricking every read-only command until a human runs
-		// "gc import install". Tamper and corruption failures (bad schema,
-		// content drift, repo/commit mismatch) are neither sentinel and still
-		// hard-fail; remote git imports have no offline rebuild path and also
-		// keep their hard failure.
-		if !errors.Is(err, builtinpacks.ErrSyntheticContentHashMismatch) &&
-			!errors.Is(err, builtinpacks.ErrSyntheticCacheMissing) {
-			return err
-		}
-		if healErr := selfHealSyntheticCacheLocked(source, cacheRoot, cacheDir, commit); healErr != nil {
-			return healErr
-		}
-		fp = remoteCacheFingerprint(cacheDir)
+		return err
 	}
 	remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: fp})
 	return nil
-}
-
-// selfHealSyntheticCacheLocked rematerializes a synthetic bundled-pack cache
-// under the repo-cache write lock. The read-lock validation already failed, so
-// this drops to the exclusive lock, re-validates (another process may have
-// healed the cache in the gap between unlocking and relocking), and only
-// rebuilds the cache if it is still invalid. Mirrors packman's
-// ensureBundledRepoInCacheLocked self-heal so both code paths share the same
-// recovery contract.
-func selfHealSyntheticCacheLocked(source, cacheRoot, cacheDir, commit string) error {
-	_, err := WithRepoCacheWriteLock(cacheRoot, func() (string, error) {
-		if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err == nil {
-			return "", nil
-		}
-		if err := builtinpacks.MaterializeSyntheticRepo(cacheDir, commit); err != nil {
-			return "", fmt.Errorf("rematerializing synthetic cache for %s at %s: %w", source, cacheDir, err)
-		}
-		if err := builtinpacks.ValidateSyntheticRepo(cacheDir, commit); err != nil {
-			return "", fmt.Errorf("validating rematerialized synthetic cache for %s at %s: %w", source, cacheDir, err)
-		}
-		return "", nil
-	})
-	return err
 }
 
 // ResetRemoteCacheValidationCache clears memoized remote-cache validations and

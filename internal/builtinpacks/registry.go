@@ -271,7 +271,7 @@ func ValidateSyntheticRepoFast(dir, commit string) error {
 	info, err := os.Lstat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return ErrSyntheticCacheMissing
+			return fmt.Errorf("missing bundled pack cache marker")
 		}
 		return fmt.Errorf("checking bundled pack cache root: %w", err)
 	}
@@ -284,7 +284,7 @@ func ValidateSyntheticRepoFast(dir, commit string) error {
 	data, err := os.ReadFile(filepath.Join(dir, syntheticMarkerFile))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return ErrSyntheticCacheMissing
+			return fmt.Errorf("missing bundled pack cache marker")
 		}
 		return fmt.Errorf("reading bundled pack cache marker: %w", err)
 	}
@@ -306,7 +306,7 @@ func ValidateSyntheticRepoFast(dir, commit string) error {
 		return err
 	}
 	if marker.ContentHash != wantHash {
-		return fmt.Errorf("%w (%q vs %q)", ErrSyntheticContentHashMismatch, marker.ContentHash, wantHash)
+		return fmt.Errorf("bundled pack cache content hash %q does not match current binary %q", marker.ContentHash, wantHash)
 	}
 	return nil
 }

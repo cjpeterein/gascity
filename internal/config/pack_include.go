@@ -221,7 +221,15 @@ func packsLockFingerprint(lockPath string) string {
 // absent or has no entry for source.
 func resolveRemoteImportCacheDir(source, cityRoot string) (string, bool, error) {
 	lockPath := filepath.Join(cityRoot, "packs.lock")
-	key := source + "\x00" + cityRoot + "\x00" + packsLockFingerprint(lockPath)
+	cacheRoot, err := RepoCacheRoot()
+	if err != nil {
+		return "", false, err
+	}
+	// The cache root (GC_REPO_CACHE_ROOT / GC_HOME / $HOME-derived) is part of
+	// the key: the resolved cacheDir lives under it, so two callers that share a
+	// cityRoot but resolve different roots (e.g. tests that relocate HOME) must
+	// not collide on a memo entry pointing into the other's cache.
+	key := cacheRoot + "\x00" + source + "\x00" + cityRoot + "\x00" + packsLockFingerprint(lockPath)
 	if v, ok := remoteImportResolutionCache.Load(key); ok {
 		return v.(string), true, nil
 	}
@@ -243,10 +251,6 @@ func resolveRemoteImportCacheDir(source, cityRoot string) (string, bool, error) 
 		return "", false, nil
 	}
 
-	cacheRoot, err := RepoCacheRoot()
-	if err != nil {
-		return "", false, err
-	}
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
 	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
 		return "", false, err

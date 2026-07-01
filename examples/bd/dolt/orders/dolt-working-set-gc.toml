@@ -17,7 +17,7 @@
 # discovered database. No history rewrite, no remote push, no flatten-
 # remediation markers — just the working-set reclaim. The integrity quarantine
 # marker is still honored. The hourly cadence keeps working-set orphans bounded
-# between the 24h flatten runs (mol-dog-compactor).
+# between the scheduled threshold-gated flatten runs (mol-dog-compactor).
 [order]
 description = "Periodic working-set CALL DOLT_GC() decoupled from the commit-count flatten threshold"
 trigger = "cooldown"

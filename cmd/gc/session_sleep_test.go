@@ -430,6 +430,10 @@ func TestReconcileSessionBeads_AssignedWorkWakesAsleepOnDemandNamedInteractiveSe
 		0,
 		&env.stdout,
 		&env.stderr,
+		// The awake bridge resolves per-bead readiness from the store's deps
+		// gate (DesiredStateResult.ReadyAssigned); the handoff bead has no
+		// blockers, so model it as ready the same way the production pass does.
+		withReadyAssignedFlags([]bool{true}),
 	)
 
 	if woken != 1 {
